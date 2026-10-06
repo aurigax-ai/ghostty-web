@@ -9,7 +9,6 @@
  * - Emitting data for Terminal to send to PTY
  *
  * Limitations:
- * - Does not handle IME/composition events (CJK input) - to be added later
  * - Captures all keyboard input (preventDefault on everything)
  */
 
@@ -186,6 +185,7 @@ export class InputHandler {
   private keypressListener: ((e: KeyboardEvent) => void) | null = null;
   private pasteListener: ((e: ClipboardEvent) => void) | null = null;
   private beforeInputListener: ((e: InputEvent) => void) | null = null;
+  private containerBeforeInputListener: ((e: InputEvent) => void) | null = null;
   private compositionStartListener: ((e: CompositionEvent) => void) | null = null;
   private compositionUpdateListener: ((e: CompositionEvent) => void) | null = null;
   private compositionEndListener: ((e: CompositionEvent) => void) | null = null;
@@ -284,6 +284,13 @@ export class InputHandler {
     if (this.inputElement) {
       this.beforeInputListener = this.handleBeforeInput.bind(this);
       this.inputElement.addEventListener('beforeinput', this.beforeInputListener);
+    }
+
+    if (this.inputElement !== this.container) {
+      this.containerBeforeInputListener = (event: InputEvent) => {
+        if (event.target === this.container) this.handleBeforeInput(event);
+      };
+      this.container.addEventListener('beforeinput', this.containerBeforeInputListener);
     }
 
     this.compositionStartListener = this.handleCompositionStart.bind(this);
@@ -1055,6 +1062,11 @@ export class InputHandler {
     if (this.beforeInputListener && this.inputElement) {
       this.inputElement.removeEventListener('beforeinput', this.beforeInputListener);
       this.beforeInputListener = null;
+    }
+
+    if (this.containerBeforeInputListener) {
+      this.container.removeEventListener('beforeinput', this.containerBeforeInputListener);
+      this.containerBeforeInputListener = null;
     }
 
     if (this.compositionStartListener) {

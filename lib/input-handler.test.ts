@@ -463,6 +463,30 @@ describe('InputHandler', () => {
 
       expect(dataReceived).toEqual(['你好']);
     });
+    test('commits text inserted into the focused container without a key press', () => {
+      const inputElement = createMockContainer();
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        inputElement as any
+      );
+
+      const event = { ...createBeforeInputEvent('insertText', 'é日█'), target: container };
+      container.dispatchEvent(event);
+
+      expect(dataReceived).toEqual(['é日█']);
+      expect(event.preventDefault).toHaveBeenCalled();
+      handler.dispose();
+      expect(container._listeners.get('beforeinput')!.length).toBe(0);
+    });
   });
 
   describe('Control Characters', () => {
