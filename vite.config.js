@@ -17,9 +17,9 @@ export default defineConfig({
   build: {
     lib: {
       entry: 'lib/index.ts',
-      name: 'OstiaGhostty',
+      name: 'GhosttyWeb',
       fileName: (format) => {
-        return format === 'es' ? 'ostia-ghostty.js' : 'ostia-ghostty.umd.cjs';
+        return format === 'es' ? 'ghostty-web.js' : 'ghostty-web.umd.cjs';
       },
       formats: ['es', 'umd'],
     },

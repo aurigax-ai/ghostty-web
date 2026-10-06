@@ -40,13 +40,13 @@ export async function init(): Promise<void> {
 export function getGhostty(): Ghostty {
   if (!ghosttyInstance) {
     throw new Error(
-      'ostia-ghostty not initialized. Call init() before creating Terminal instances.\n' +
+      'ghostty-web not initialized. Call init() before creating Terminal instances.\n' +
         'Example:\n' +
-        '  import { init, Terminal } from "@aurigax-ai/ostia-ghostty";\n' +
+        '  import { init, Terminal } from "@aurigax-ai/ghostty-web";\n' +
         '  await init();\n' +
         '  const term = new Terminal();\n\n' +
         'For tests, pass a Ghostty instance directly:\n' +
-        '  import { Ghostty, Terminal } from "@aurigax-ai/ostia-ghostty";\n' +
+        '  import { Ghostty, Terminal } from "@aurigax-ai/ghostty-web";\n' +
         '  const ghostty = await Ghostty.load();\n' +
         '  const term = new Terminal({ ghostty });'
     );

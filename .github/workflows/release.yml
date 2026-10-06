@@ -1,0 +1,33 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - name: Tag matches package.json
+        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:wasm
+      - name: Committed WASM matches the pinned Ghostty
+        run: git diff --exit-code ghostty-vt.wasm
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Publish to npm
+        run: npm publish --provenance --tag ${{ contains(github.ref_name, '-') && 'next' || 'latest' }}

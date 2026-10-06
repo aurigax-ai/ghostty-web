@@ -1,4 +1,4 @@
-# ostia-ghostty
+# ghostty-web (AurigaX)
 
 [Ghostty](https://github.com/ghostty-org/ghostty)'s terminal engine in the browser, with an
 [xterm.js](https://github.com/xtermjs/xterm.js)-shaped API and a canvas renderer. It is the engine
@@ -16,6 +16,14 @@ kept with its history. It does not track upstream. What changed:
   its host (OSC 7), notifications, clipboard writes and unknown sequences, and keep markers as
   tracked grid references.
 - **pnpm and Vitest** instead of Bun; no demo server, benchmark or release automation.
+
+## Install
+
+```sh
+pnpm add @aurigax-ai/ghostty-web
+```
+
+The package ships its TypeScript source and `ghostty-vt.wasm`; bundle it with Vite or similar.
 
 ## Build
 
@@ -58,7 +66,7 @@ blink) and sleeps otherwise.
 ## Use
 
 ```ts
-import { Ghostty, Terminal, FitAddon } from '@aurigax-ai/ostia-ghostty';
+import { Ghostty, Terminal, FitAddon } from '@aurigax-ai/ghostty-web';
 
 const ghostty = await Ghostty.fromBytes(wasmBytes);
 const term = new Terminal({ ghostty, fontSize: 14 });
@@ -69,6 +77,13 @@ fit.fit();
 term.onData((data) => pty.write(data));
 pty.onData((data) => term.write(data));
 ```
+
+## Release
+
+Raise `version` in `package.json`, commit, and push a matching `v<version>` tag. `release.yml`
+rebuilds the WASM, checks it matches the committed file, runs the tests and publishes to npm with
+trusted publishing (no token). A version with a `-` (e.g. `0.2.0-rc.1`) is published under the
+`next` tag.
 
 ## License
 

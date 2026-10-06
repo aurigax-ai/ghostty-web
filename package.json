@@ -1,6 +1,6 @@
 {
-  "name": "@aurigax-ai/ostia-ghostty",
-  "version": "0.0.0",
+  "name": "@aurigax-ai/ghostty-web",
+  "version": "0.1.0",
   "description": "Ghostty's terminal engine (libghostty-vt) in the browser: WebAssembly build, an xterm.js-shaped API and a canvas renderer. A hard fork of coder/ghostty-web.",
   "type": "module",
   "main": "./lib/index.ts",
@@ -15,6 +15,8 @@
   },
   "files": [
     "lib",
+    "!lib/**/*.test.ts",
+    "!lib/test-helpers.ts",
     "ghostty-vt.wasm",
     "GHOSTTY_COMMIT",
     "README.md",
@@ -34,10 +36,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/aurigax-ai/ostia-ghostty.git"
+    "url": "git+https://github.com/aurigax-ai/ghostty-web.git"
   },
-  "bugs": "https://github.com/aurigax-ai/ostia-ghostty/issues",
-  "homepage": "https://github.com/aurigax-ai/ostia-ghostty#readme",
+  "bugs": "https://github.com/aurigax-ai/ghostty-web/issues",
+  "homepage": "https://github.com/aurigax-ai/ghostty-web#readme",
   "license": "MIT",
   "author": "AurigaX",
   "publishConfig": {
