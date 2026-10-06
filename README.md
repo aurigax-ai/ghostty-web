@@ -19,7 +19,10 @@ kept with its history. It does not track upstream. What changed:
 
 ## Build
 
-Needs [Zig](https://ziglang.org) 0.16.0 and pnpm.
+Needs [Zig](https://ziglang.org) 0.16.0 and pnpm. Use the official Zig tarball (as CI does): a
+distribution's Zig built against its own LLVM produces a different, equally valid `ghostty-vt.wasm`,
+and CI checks that the committed file matches the official build. Point `ZIG` at it if it is not the
+`zig` on your PATH: `ZIG=/path/to/zig pnpm build:wasm`.
 
 ```sh
 pnpm install
