@@ -1,7 +1,7 @@
 # ghostty-web (AurigaX)
 
 [Ghostty](https://github.com/ghostty-org/ghostty)'s terminal engine in the browser, with an
-[xterm.js](https://github.com/xtermjs/xterm.js)-shaped API and a canvas renderer. It is the engine
+[xterm.js](https://github.com/xtermjs/xterm.js)-shaped API and WebGL and canvas renderers. It is the engine
 behind the Ghostty terminal in Ostia.
 
 This is a hard fork of [coder/ghostty-web](https://github.com/coder/ghostty-web) (MIT, © Coder),
@@ -15,6 +15,10 @@ kept with its history. It does not track upstream. What changed:
   (`Abi.addCallback`), so the host can receive prompt marks (OSC 133), the working directory with
   its host (OSC 7), notifications, clipboard writes and unknown sequences, and keep markers as
   tracked grid references.
+- **WebGL renderer.** `renderer: 'webgl'` (the default) draws with WebGL 2 from a glyph atlas,
+  rewriting only the rows that changed; without WebGL 2, or when its context is lost, the terminal
+  draws with the canvas renderer instead (`renderer: 'canvas'` asks for it). Both draw box drawing
+  and block elements from geometry, so they fill their cells.
 - **pnpm and Vitest** instead of Bun; no demo server, benchmark or release automation.
 
 ## Install

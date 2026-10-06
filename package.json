@@ -1,7 +1,7 @@
 {
   "name": "@aurigax-ai/ghostty-web",
-  "version": "0.1.0",
-  "description": "Ghostty's terminal engine (libghostty-vt) in the browser: WebAssembly build, an xterm.js-shaped API and a canvas renderer. A hard fork of coder/ghostty-web.",
+  "version": "0.2.0",
+  "description": "Ghostty's terminal engine (libghostty-vt) in the browser: WebAssembly build, an xterm.js-shaped API and WebGL and canvas renderers. A hard fork of coder/ghostty-web.",
   "type": "module",
   "main": "./lib/index.ts",
   "module": "./lib/index.ts",
