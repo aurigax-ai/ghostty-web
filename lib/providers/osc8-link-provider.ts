@@ -10,7 +10,9 @@
  * so we just need to scan for contiguous regions with the same ID.
  */
 
+import type { ILinkHandler } from '../interfaces';
 import type { IBufferRange, ILink, ILinkProvider } from '../types';
+import { webLink } from './web-link';
 
 /**
  * OSC 8 Hyperlink Provider
@@ -96,16 +98,7 @@ export class OSC8LinkProvider implements ILinkProvider {
           end: { x: endX, y },
         };
 
-        links.push({
-          text: uri,
-          range,
-          activate: (event) => {
-            // Open link if Ctrl/Cmd is pressed
-            if (event.ctrlKey || event.metaKey) {
-              window.open(uri, '_blank', 'noopener,noreferrer');
-            }
-          },
-        });
+        links.push(webLink(uri, range, () => this.terminal.options?.linkHandler ?? undefined));
       }
     }
 
@@ -121,6 +114,7 @@ export class OSC8LinkProvider implements ILinkProvider {
  * Minimal terminal interface required by OSC8LinkProvider
  */
 export interface ITerminalForOSC8Provider {
+  options?: { linkHandler?: ILinkHandler | null };
   buffer: {
     active: {
       length: number;

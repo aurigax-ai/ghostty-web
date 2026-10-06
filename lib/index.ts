@@ -102,6 +102,12 @@ export type { SelectionCoordinates } from './selection-manager';
 
 // Addons
 export { FitAddon } from './addons/fit';
+export { SearchAddon } from './addons/search';
+export type {
+  ISearchDecorationOptions,
+  ISearchOptions,
+  ISearchResultChangeEvent,
+} from './addons/search';
 export type { ITerminalDimensions } from './addons/fit';
 
 // Link providers

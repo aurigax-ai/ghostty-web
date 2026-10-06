@@ -9,7 +9,7 @@
  */
 
 import { drawBoxGlyph, isBoxGlyph } from './box-glyphs';
-import type { ITheme } from './interfaces';
+import type { FontWeight, ITheme } from './interfaces';
 import type { SelectionManager } from './selection-manager';
 import type { GhosttyCell } from './types';
 import { CellFlags } from './types';
@@ -58,6 +58,16 @@ export interface RendererOptions {
   cursorBlink?: boolean; // Default: false
   theme?: ITheme;
   devicePixelRatio?: number; // Default: window.devicePixelRatio
+  fontWeight?: FontWeight; // Default: 'normal'
+  fontWeightBold?: FontWeight; // Default: 'bold'
+  lineHeight?: number; // Default: 1
+  minimumContrastRatio?: number; // Default: 1 (off)
+}
+
+export interface FontOptions {
+  fontWeight: FontWeight;
+  fontWeightBold: FontWeight;
+  lineHeight: number;
 }
 
 export interface FontMetrics {
@@ -99,6 +109,19 @@ export const DEFAULT_THEME: Required<ITheme> = {
 
 export type CursorStyle = 'block' | 'underline' | 'bar';
 
+/** A search match drawn on one viewport row, columns inclusive. */
+export interface SearchHighlight {
+  row: number;
+  start: number;
+  end: number;
+  active: boolean;
+}
+
+export interface SearchHighlightColors {
+  match: string;
+  active: string;
+}
+
 export interface LinkRange {
   startX: number;
   startY: number;
@@ -121,17 +144,74 @@ export interface FrameOverlay {
 }
 
 /** Measures the cell box of a font: width of 'M' and height from its ascent and descent. */
-export function measureCell(fontSize: number, fontFamily: string): FontMetrics {
+/**
+ * Measures the cell box the way xterm.js's WebGL renderer does: the advance of
+ * 'W' floored to device pixels, and the font's ascent plus descent (its line
+ * box) times lineHeight, with the text centered in the extra space.
+ */
+export function measureCell(
+  fontSize: number,
+  fontFamily: string,
+  fontWeight: FontWeight = 'normal',
+  lineHeight = 1,
+  dpr = 1
+): FontMetrics {
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d')!;
-  ctx.font = `${fontSize}px ${fontFamily}`;
-  const widthMetrics = ctx.measureText('M');
-  const width = Math.ceil(widthMetrics.width);
-  const ascent = widthMetrics.actualBoundingBoxAscent || fontSize * 0.8;
-  const descent = widthMetrics.actualBoundingBoxDescent || fontSize * 0.2;
-  const height = Math.ceil(ascent + descent) + 2;
-  const baseline = Math.ceil(ascent) + 1;
+  ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+  const m = ctx.measureText('W');
+  const width = Math.max(1, Math.floor(m.width * dpr)) / dpr;
+  const ascent = m.fontBoundingBoxAscent || m.actualBoundingBoxAscent || fontSize * 0.8;
+  const descent = m.fontBoundingBoxDescent || m.actualBoundingBoxDescent || fontSize * 0.2;
+  const charHeight = Math.ceil((ascent + descent) * dpr) / dpr;
+  const height = Math.max(charHeight, Math.floor(charHeight * lineHeight * dpr) / dpr);
+  const baseline = Math.round(((height - charHeight) / 2 + ascent) * dpr) / dpr;
   return { width, height, baseline };
+}
+
+/** WCAG relative luminance of an sRGB color. */
+function luminance(r: number, g: number, b: number): number {
+  const channel = (c: number) => {
+    const v = c / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+}
+
+function contrast(a: number, b: number): number {
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
+/**
+ * The foreground moved toward black or white, whichever reaches `ratio`
+ * against the background first (black first on a light background), in 10%
+ * steps; the original when it already reaches it.
+ */
+export function ensureContrast(
+  fg: [number, number, number],
+  bg: [number, number, number],
+  ratio: number
+): [number, number, number] {
+  const bgLum = luminance(bg[0], bg[1], bg[2]);
+  if (contrast(luminance(fg[0], fg[1], fg[2]), bgLum) >= ratio) return fg;
+  const toward = (target: number): [number, number, number] | null => {
+    for (let step = 1; step <= 10; step++) {
+      const t = step / 10;
+      const c: [number, number, number] = [
+        Math.round(fg[0] + (target - fg[0]) * t),
+        Math.round(fg[1] + (target - fg[1]) * t),
+        Math.round(fg[2] + (target - fg[2]) * t),
+      ];
+      if (contrast(luminance(c[0], c[1], c[2]), bgLum) >= ratio) return c;
+    }
+    return null;
+  };
+  const darkFirst = bgLum > 0.5;
+  return (
+    toward(darkFirst ? 0 : 255) ??
+    toward(darkFirst ? 255 : 0) ??
+    (darkFirst ? [0, 0, 0] : [255, 255, 255])
+  );
 }
 
 // ============================================================================
@@ -147,8 +227,15 @@ export abstract class TerminalRenderer {
   protected theme: Required<ITheme>;
   protected devicePixelRatio: number;
   protected metrics: FontMetrics;
+  protected fontWeight: FontWeight;
+  protected fontWeightBold: FontWeight;
+  protected lineHeight: number;
+  protected minimumContrastRatio: number;
+  private readonly contrastCache = new Map<number, number>();
+  private themeBackgroundRgb: [number, number, number] = [0, 0, 0];
 
   protected cursorVisible = true;
+  private lastCursorVisible = true;
   private cursorBlinkInterval?: number;
 
   /** Called when the renderer needs another frame (cursor blink), so an idle render loop wakes. */
@@ -169,6 +256,10 @@ export abstract class TerminalRenderer {
     endRow: number;
   } | null = null;
 
+  private highlights = new Map<number, SearchHighlight[]>();
+  private readonly highlightRows = new Set<number>();
+  protected highlightColors: SearchHighlightColors = { match: '#5c6266', active: '#538bb5' };
+
   protected hoveredHyperlinkId = 0;
   private previousHoveredHyperlinkId = 0;
   protected hoveredLinkRange: LinkRange | null = null;
@@ -185,7 +276,12 @@ export abstract class TerminalRenderer {
     this.cursorBlink = options.cursorBlink ?? false;
     this.theme = { ...DEFAULT_THEME, ...options.theme };
     this.devicePixelRatio = options.devicePixelRatio ?? window.devicePixelRatio ?? 1;
-    this.metrics = measureCell(this.fontSize, this.fontFamily);
+    this.fontWeight = options.fontWeight ?? 'normal';
+    this.fontWeightBold = options.fontWeightBold ?? 'bold';
+    this.lineHeight = options.lineHeight ?? 1;
+    this.minimumContrastRatio = options.minimumContrastRatio ?? 1;
+    this.themeBackgroundRgb = cssRgb(this.theme.background);
+    this.metrics = this.measure();
     if (this.cursorBlink) this.startCursorBlink();
   }
 
@@ -230,7 +326,9 @@ export abstract class TerminalRenderer {
 
     const cursorMoved =
       cursor.x !== this.lastCursorPosition.x || cursor.y !== this.lastCursorPosition.y;
-    if (this.cursorInRows && (cursorMoved || this.cursorBlink)) {
+    const blinked = this.cursorVisible !== this.lastCursorVisible;
+    this.lastCursorVisible = this.cursorVisible;
+    if (this.cursorInRows && (cursorMoved || blinked)) {
       if (!forceAll && !buffer.isRowDirty(cursor.y)) {
         const line = buffer.getLine(cursor.y);
         if (line) this.drawLine(line, cursor.y, dims.cols);
@@ -250,6 +348,8 @@ export abstract class TerminalRenderer {
       const coords = this.currentSelectionCoords;
       for (let row = coords.startRow; row <= coords.endRow; row++) selectionRows.add(row);
     }
+    for (const row of this.highlightRows) selectionRows.add(row);
+    this.highlightRows.clear();
     if (this.selectionManager) {
       const dirtyRows = this.selectionManager.getDirtySelectionRows();
       if (dirtyRows.size > 0) {
@@ -354,6 +454,38 @@ export abstract class TerminalRenderer {
     return y > startRow && y < endRow;
   }
 
+  /** Search highlight under a cell: 0 none, 1 a match, 2 the selected match. */
+  protected highlightAt(x: number, y: number): 0 | 1 | 2 {
+    const ranges = this.highlights.get(y);
+    if (!ranges) return 0;
+    for (const range of ranges) {
+      if (x >= range.start && x <= range.end) return range.active ? 2 : 1;
+    }
+    return 0;
+  }
+
+  /** Shows search matches (null clears them); only rows whose highlights changed are redrawn. */
+  public setSearchHighlights(
+    highlights: SearchHighlight[] | null,
+    colors?: SearchHighlightColors
+  ): void {
+    for (const row of this.highlights.keys()) this.highlightRows.add(row);
+    this.highlights = new Map();
+    for (const highlight of highlights ?? []) {
+      const row = this.highlights.get(highlight.row);
+      if (row) row.push(highlight);
+      else this.highlights.set(highlight.row, [highlight]);
+      this.highlightRows.add(highlight.row);
+    }
+    if (colors) {
+      this.highlightColors = colors;
+      this.searchColorsChanged();
+    }
+  }
+
+  /** Called when the search highlight colors change. */
+  protected searchColorsChanged(): void {}
+
   /** Whether the cell has a hovered link under it (OSC 8 id or a detected URL range). */
   protected linkHovered(cell: GhosttyCell, x: number, y: number): boolean {
     if (cell.hyperlink_id > 0 && cell.hyperlink_id === this.hoveredHyperlinkId) return true;
@@ -411,13 +543,68 @@ export abstract class TerminalRenderer {
   // Public API
   // ==========================================================================
 
+  private measure(): FontMetrics {
+    return measureCell(
+      this.fontSize,
+      this.fontFamily,
+      this.fontWeight,
+      this.lineHeight,
+      this.devicePixelRatio
+    );
+  }
+
   public remeasureFont(): void {
-    this.metrics = measureCell(this.fontSize, this.fontFamily);
+    this.metrics = this.measure();
     this.fontChanged();
+  }
+
+  public setFontOptions(options: FontOptions): void {
+    this.fontWeight = options.fontWeight;
+    this.fontWeightBold = options.fontWeightBold;
+    this.lineHeight = options.lineHeight;
+    this.remeasureFont();
+  }
+
+  public setMinimumContrastRatio(ratio: number): void {
+    this.minimumContrastRatio = ratio;
+    this.contrastCache.clear();
   }
 
   public setTheme(theme: ITheme): void {
     this.theme = { ...DEFAULT_THEME, ...theme };
+    this.requestFullRedraw();
+    this.themeBackgroundRgb = cssRgb(this.theme.background);
+    this.contrastCache.clear();
+  }
+
+  /** The CSS font for a cell style (CellFlags.BOLD / ITALIC) at `size` px. */
+  protected fontString(style: number, size: number): string {
+    const italic = style & CellFlags.ITALIC ? 'italic ' : '';
+    const weight = style & CellFlags.BOLD ? this.fontWeightBold : this.fontWeight;
+    return `${italic}${weight} ${size}px ${this.fontFamily}`;
+  }
+
+  /**
+   * The foreground (packed 0xRRGGBB) a cell is drawn with once
+   * minimumContrastRatio is applied against its background; `bg` is null for
+   * the theme background.
+   */
+  protected contrastedForeground(fg: number, bg: number | null): number {
+    if (this.minimumContrastRatio <= 1) return fg;
+    const back = bg ?? rgbWord(this.themeBackgroundRgb);
+    const key = fg * 0x1000000 + back;
+    let result = this.contrastCache.get(key);
+    if (result === undefined) {
+      const [r, g, b] = ensureContrast(
+        [(fg >> 16) & 0xff, (fg >> 8) & 0xff, fg & 0xff],
+        [(back >> 16) & 0xff, (back >> 8) & 0xff, back & 0xff],
+        this.minimumContrastRatio
+      );
+      result = rgbWord([r, g, b]);
+      if (this.contrastCache.size > 4096) this.contrastCache.clear();
+      this.contrastCache.set(key, result);
+    }
+    return result;
   }
 
   public setFontSize(size: number): void {
@@ -483,6 +670,24 @@ export abstract class TerminalRenderer {
   }
 }
 
+function rgbWord([r, g, b]: [number, number, number]): number {
+  return (r << 16) | (g << 8) | b;
+}
+
+/** An opaque CSS color as RGB; black when it cannot be read. */
+export function cssRgb(css: string): [number, number, number] {
+  const hex = /^#([0-9a-f]{3,8})$/i.exec(css.trim());
+  if (hex) {
+    let h = hex[1];
+    if (h.length === 3 || h.length === 4) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    const v = Number.parseInt(h.slice(0, 6), 16);
+    return [(v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff];
+  }
+  const rgb = /rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)/i.exec(css);
+  if (rgb) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
+  return [0, 0, 0];
+}
+
 function sameRange(a: LinkRange | null, b: LinkRange | null): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
@@ -513,8 +718,8 @@ export class CanvasRenderer extends TerminalRenderer {
 
   protected surfaceMismatch(cols: number, rows: number): boolean {
     return (
-      this.canvas.width !== cols * this.metrics.width * this.devicePixelRatio ||
-      this.canvas.height !== rows * this.metrics.height * this.devicePixelRatio
+      this.canvas.width !== Math.round(cols * this.metrics.width * this.devicePixelRatio) ||
+      this.canvas.height !== Math.round(rows * this.metrics.height * this.devicePixelRatio)
     );
   }
 
@@ -523,8 +728,8 @@ export class CanvasRenderer extends TerminalRenderer {
     const cssHeight = rows * this.metrics.height;
     this.canvas.style.width = `${cssWidth}px`;
     this.canvas.style.height = `${cssHeight}px`;
-    this.canvas.width = cssWidth * this.devicePixelRatio;
-    this.canvas.height = cssHeight * this.devicePixelRatio;
+    this.canvas.width = Math.round(cssWidth * this.devicePixelRatio);
+    this.canvas.height = Math.round(cssHeight * this.devicePixelRatio);
     this.resetContextCache();
     this.ctx.scale(this.devicePixelRatio, this.devicePixelRatio);
     this.ctx.textBaseline = 'alphabetic';
@@ -636,6 +841,9 @@ export class CanvasRenderer extends TerminalRenderer {
 
   private backgroundColor(cell: GhosttyCell, x: number, y: number): string | null {
     if (this.isInSelection(x, y)) return this.theme.selectionBackground;
+    const highlight = this.highlightAt(x, y);
+    if (highlight)
+      return highlight === 2 ? this.highlightColors.active : this.highlightColors.match;
     const inverse = cell.flags & CellFlags.INVERSE;
     const r = inverse ? cell.fg_r : cell.bg_r;
     const g = inverse ? cell.fg_g : cell.bg_g;
@@ -646,8 +854,15 @@ export class CanvasRenderer extends TerminalRenderer {
 
   private foregroundColor(cell: GhosttyCell, selected: boolean): string {
     if (selected) return this.theme.selectionForeground;
-    if (cell.flags & CellFlags.INVERSE) return this.cssColor(cell.bg_r, cell.bg_g, cell.bg_b);
-    return this.cssColor(cell.fg_r, cell.fg_g, cell.fg_b);
+    const inverse = cell.flags & CellFlags.INVERSE;
+    const fg = inverse
+      ? (cell.bg_r << 16) | (cell.bg_g << 8) | cell.bg_b
+      : (cell.fg_r << 16) | (cell.fg_g << 8) | cell.fg_b;
+    const bg = inverse
+      ? (cell.fg_r << 16) | (cell.fg_g << 8) | cell.fg_b
+      : (cell.bg_r << 16) | (cell.bg_g << 8) | cell.bg_b;
+    const word = this.contrastedForeground(fg, bg === 0 ? null : bg);
+    return this.cssColor((word >> 16) & 0xff, (word >> 8) & 0xff, word & 0xff);
   }
 
   private cssColor(r: number, g: number, b: number): string {
@@ -679,10 +894,7 @@ export class CanvasRenderer extends TerminalRenderer {
   private fontFor(style: number): string {
     let font = this.fonts[style];
     if (font === undefined) {
-      let prefix = '';
-      if (style & CellFlags.ITALIC) prefix += 'italic ';
-      if (style & CellFlags.BOLD) prefix += 'bold ';
-      font = `${prefix}${this.fontSize}px ${this.fontFamily}`;
+      font = this.fontString(style, this.fontSize);
       this.fonts[style] = font;
     }
     return font;

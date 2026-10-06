@@ -25,7 +25,7 @@ import { CellFlags } from './types';
 const RECT_WORDS = 5;
 const GLYPH_WORDS = 8;
 const OVERLAY_RECTS = 4;
-const ATLAS_START = 1024;
+const ATLAS_START = 512;
 const ATLAS_MAX = 4096;
 const COLORED_SPREAD = 24;
 
@@ -99,10 +99,15 @@ function pack(r: number, g: number, b: number, a: number): number {
   return (r | (g << 8) | (b << 16) | (a << 24)) >>> 0;
 }
 
-/** Glyph atlas: a CPU canvas mirrored into a texture, so growing it keeps every entry. */
+/**
+ * Glyph atlas: a texture packed in shelves of one slot height. Each glyph is
+ * rasterized in a scratch canvas the size of one slot and uploaded; the
+ * texture grows by copying itself on the GPU, so entries stay valid and no
+ * CPU copy of the atlas is kept.
+ */
 class GlyphAtlas {
   size = ATLAS_START;
-  private mirror: HTMLCanvasElement;
+  private readonly scratch: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private entries = new Map<number | string, AtlasEntry | null>();
   private shelfX = 0;
@@ -115,31 +120,31 @@ class GlyphAtlas {
     private readonly gl: WebGL2RenderingContext,
     private slotHeight: number
   ) {
-    this.mirror = document.createElement('canvas');
-    this.ctx = this.newMirror(this.size);
-    this.texture = gl.createTexture()!;
-    this.allocateTexture();
+    this.scratch = document.createElement('canvas');
+    this.ctx = this.scratchContext(1, slotHeight);
+    this.texture = this.newTexture(this.size);
   }
 
-  private newMirror(size: number): CanvasRenderingContext2D {
-    this.mirror.width = size;
-    this.mirror.height = size;
-    const ctx = this.mirror.getContext('2d', { willReadFrequently: true });
-    if (!ctx) throw new Error('Failed to get the glyph atlas context');
+  private scratchContext(w: number, h: number): CanvasRenderingContext2D {
+    if (this.scratch.width < w) this.scratch.width = w;
+    if (this.scratch.height !== h) this.scratch.height = h;
+    const ctx = this.scratch.getContext('2d', { willReadFrequently: true });
+    if (!ctx) throw new Error('Failed to get the glyph scratch context');
     ctx.textBaseline = 'alphabetic';
     ctx.textAlign = 'left';
     return ctx;
   }
 
-  private allocateTexture(): void {
+  private newTexture(size: number): WebGLTexture {
     const gl = this.gl;
-    gl.bindTexture(gl.TEXTURE_2D, this.texture);
-    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    const texture = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.mirror);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    return texture;
   }
 
   /** Drops every glyph, for a new font or cell size. */
@@ -148,41 +153,32 @@ class GlyphAtlas {
     this.entries.clear();
     this.shelfX = 0;
     this.shelfY = 0;
-    this.ctx.clearRect(0, 0, this.size, this.size);
-    this.allocateTexture();
+    this.gl.deleteTexture(this.texture);
+    this.size = ATLAS_START;
+    this.texture = this.newTexture(this.size);
   }
 
   lookup(key: number | string): AtlasEntry | null | undefined {
     return this.entries.get(key);
   }
 
-  /** Rasterizes a glyph with `draw` into a free slot w px wide and uploads it. */
+  /** Rasterizes a glyph with `draw` (at 0, 0 of a w px wide slot) and uploads it. */
   add(
     key: number | string,
     w: number,
     draw: (ctx: CanvasRenderingContext2D, x: number, y: number) => void
   ): AtlasEntry | null {
     const h = this.slotHeight;
-    if (this.shelfX + w > this.size) {
-      this.shelfX = 0;
-      this.shelfY += h;
-    }
-    if (this.shelfY + h > this.size && !this.grow()) {
-      this.reset(h);
-      this.cleared = true;
-    }
-    const x = this.shelfX;
-    const y = this.shelfY;
-    this.shelfX += w;
+    if (this.scratch.width < w || this.scratch.height !== h) this.ctx = this.scratchContext(w, h);
     const ctx = this.ctx;
     ctx.save();
     ctx.beginPath();
-    ctx.rect(x, y, w, h);
+    ctx.rect(0, 0, w, h);
     ctx.clip();
-    ctx.clearRect(x, y, w, h);
-    draw(ctx, x, y);
+    ctx.clearRect(0, 0, w, h);
+    draw(ctx, 0, 0);
     ctx.restore();
-    const pixels = ctx.getImageData(x, y, w, h);
+    const pixels = ctx.getImageData(0, 0, w, h);
     const data = pixels.data;
     let inked = false;
     let colored = false;
@@ -198,10 +194,20 @@ class GlyphAtlas {
       }
     }
     if (!inked) {
-      this.shelfX = x;
       this.entries.set(key, null);
       return null;
     }
+    if (this.shelfX + w > this.size) {
+      this.shelfX = 0;
+      this.shelfY += h;
+    }
+    if (this.shelfY + h > this.size && !this.grow()) {
+      this.reset(h);
+      this.cleared = true;
+    }
+    const x = this.shelfX;
+    const y = this.shelfY;
+    this.shelfX += w;
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
@@ -211,19 +217,25 @@ class GlyphAtlas {
     return entry;
   }
 
+  /** Doubles the texture, copying the old one into its top-left corner on the GPU. */
   private grow(): boolean {
-    const limit = Math.min(ATLAS_MAX, this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE) as number);
+    const gl = this.gl;
+    const limit = Math.min(ATLAS_MAX, gl.getParameter(gl.MAX_TEXTURE_SIZE) as number);
     if (this.size * 2 > limit) return false;
-    const old = document.createElement('canvas');
-    old.width = this.size;
-    old.height = this.size;
-    old.getContext('2d')!.drawImage(this.mirror, 0, 0);
+    const old = this.texture;
+    const oldSize = this.size;
     this.size *= 2;
-    this.ctx = this.newMirror(this.size);
-    this.ctx.drawImage(old, 0, 0);
-    this.allocateTexture();
+    this.texture = this.newTexture(this.size);
+    const framebuffer = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, framebuffer);
+    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, old, 0);
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, oldSize, oldSize);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    gl.deleteFramebuffer(framebuffer);
+    gl.deleteTexture(old);
     this.shelfX = 0;
-    this.shelfY = old.height;
+    this.shelfY = oldSize;
     return true;
   }
 
@@ -286,6 +298,8 @@ export class WebglRenderer extends TerminalRenderer {
     selectionBackground: number;
     selectionForeground: number;
     link: number;
+    match: number;
+    activeMatch: number;
   };
 
   /** Called once if the WebGL context is lost; the terminal then switches renderer. */
@@ -443,6 +457,10 @@ export class WebglRenderer extends TerminalRenderer {
     this.markAllRows();
   }
 
+  protected searchColorsChanged(): void {
+    this.parseTheme();
+  }
+
   private markAllRows(): void {
     this.dirtyFrom = 0;
     this.dirtyTo = this.rows - 1;
@@ -477,6 +495,8 @@ export class WebglRenderer extends TerminalRenderer {
       selectionBackground: this.parseColor(t.selectionBackground),
       selectionForeground: this.parseColor(t.selectionForeground),
       link: this.parseColor(LINK_COLOR),
+      match: this.parseColor(this.highlightColors.match),
+      activeMatch: this.parseColor(this.highlightColors.active),
     };
   }
 
@@ -521,8 +541,11 @@ export class WebglRenderer extends TerminalRenderer {
       const inverse = cell.flags & CellFlags.INVERSE;
 
       let bgWord = 0;
+      const highlight = selected ? 0 : this.highlightAt(x, y);
       if (selected) {
         bgWord = theme.selectionBackground;
+      } else if (highlight) {
+        bgWord = highlight === 2 ? theme.activeMatch : theme.match;
       } else {
         const r = inverse ? cell.fg_r : cell.bg_r;
         const g = inverse ? cell.fg_g : cell.bg_g;
@@ -538,9 +561,18 @@ export class WebglRenderer extends TerminalRenderer {
       }
 
       let fgWord: number;
-      if (selected) fgWord = theme.selectionForeground;
-      else if (inverse) fgWord = pack(cell.bg_r, cell.bg_g, cell.bg_b, 255);
-      else fgWord = pack(cell.fg_r, cell.fg_g, cell.fg_b, 255);
+      if (selected) {
+        fgWord = theme.selectionForeground;
+      } else {
+        const fg = inverse
+          ? (cell.bg_r << 16) | (cell.bg_g << 8) | cell.bg_b
+          : (cell.fg_r << 16) | (cell.fg_g << 8) | cell.fg_b;
+        const back = inverse
+          ? (cell.fg_r << 16) | (cell.fg_g << 8) | cell.fg_b
+          : (cell.bg_r << 16) | (cell.bg_g << 8) | cell.bg_b;
+        const shown = this.contrastedForeground(fg, back === 0 ? null : back);
+        fgWord = pack((shown >> 16) & 0xff, (shown >> 8) & 0xff, shown & 0xff, 255);
+      }
       if (cell.flags & CellFlags.FAINT) fgWord = ((fgWord & 0x00ffffff) | (128 << 24)) >>> 0;
       if (cell.flags & CellFlags.INVISIBLE) continue;
 
@@ -606,10 +638,7 @@ export class WebglRenderer extends TerminalRenderer {
   }
 
   private atlasFont(style: number): string {
-    let prefix = '';
-    if (style & CellFlags.ITALIC) prefix += 'italic ';
-    if (style & CellFlags.BOLD) prefix += 'bold ';
-    return `${prefix}${this.fontSize * this.devicePixelRatio}px ${this.fontFamily}`;
+    return this.fontString(style, this.fontSize * this.devicePixelRatio);
   }
 
   // ==========================================================================

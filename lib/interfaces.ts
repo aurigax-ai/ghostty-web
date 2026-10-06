@@ -14,12 +14,26 @@ export interface ITerminalOptions {
   fontSize?: number; // Default: 15
   fontFamily?: string; // Default: 'monospace'
   allowTransparency?: boolean;
+  fontWeight?: FontWeight; // Default: 'normal'
+  fontWeightBold?: FontWeight; // Default: 'bold'
+  lineHeight?: number; // Multiplies the cell height. Default: 1
+  scrollSensitivity?: number; // Multiplies wheel scrolling. Default: 1
+  /** Foreground colors are adjusted to at least this contrast ratio with their background (1 to 21). Default: 1 */
+  minimumContrastRatio?: number;
+  /** On macOS, Option acts as Meta instead of composing characters. Default: false */
+  macOptionIsMeta?: boolean;
   /**
    * How the terminal draws, read when it opens. 'webgl' draws on the GPU and
    * falls back to 'canvas' when WebGL 2 is unavailable or its context is lost.
    * Default: 'webgl'.
    */
   renderer?: 'webgl' | 'canvas';
+
+  /**
+   * What clicking and hovering a web link does (plain URLs and OSC 8
+   * hyperlinks). Without one, Ctrl/Cmd+click opens the link in a new window.
+   */
+  linkHandler?: ILinkHandler | null;
 
   // Phase 1 additions
   convertEol?: boolean; // Convert \n to \r\n (default: false)
@@ -31,6 +45,15 @@ export interface ITerminalOptions {
   // Internal: Ghostty WASM instance (optional, for test isolation)
   // If not provided, uses the module-level instance from init()
   ghostty?: Ghostty;
+}
+
+export type FontWeight = 'normal' | 'bold' | number;
+
+/** Handles web links the way xterm.js's `linkHandler` option does. Ranges are 0-based buffer cells. */
+export interface ILinkHandler {
+  activate(event: MouseEvent, text: string, range: IBufferRange): void;
+  hover?(event: MouseEvent, text: string, range: IBufferRange): void;
+  leave?(event: MouseEvent, text: string, range: IBufferRange): void;
 }
 
 export interface ITheme {

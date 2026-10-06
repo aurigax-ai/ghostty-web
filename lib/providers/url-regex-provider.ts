@@ -8,7 +8,9 @@
  * take precedence over regex-detected URLs.
  */
 
+import type { ILinkHandler } from '../interfaces';
 import type { ILink, ILinkProvider } from '../types';
+import { webLink } from './web-link';
 
 /**
  * URL Regex Provider
@@ -74,19 +76,13 @@ export class UrlRegexProvider implements ILinkProvider {
 
       // Skip if URL is too short (e.g., just "http://")
       if (url.length > 8) {
-        links.push({
-          text: url,
-          range: {
-            start: { x: startX, y },
-            end: { x: endX, y },
-          },
-          activate: (event) => {
-            // Open link if Ctrl/Cmd is pressed
-            if (event.ctrlKey || event.metaKey) {
-              window.open(url, '_blank', 'noopener,noreferrer');
-            }
-          },
-        });
+        links.push(
+          webLink(
+            url,
+            { start: { x: startX, y }, end: { x: endX, y } },
+            () => this.terminal.options?.linkHandler ?? undefined
+          )
+        );
       }
 
       // Get next match
@@ -130,6 +126,7 @@ export class UrlRegexProvider implements ILinkProvider {
  * Minimal terminal interface required by UrlRegexProvider
  */
 export interface ITerminalForUrlProvider {
+  options?: { linkHandler?: ILinkHandler | null };
   buffer: {
     active: {
       getLine(y: number): IBufferLineForUrlProvider | undefined;

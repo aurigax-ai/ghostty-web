@@ -6,7 +6,14 @@
  * grid references and key encoder through `Abi`.
  */
 
-import { Abi, GHOSTTY_SUCCESS, GhosttyCallError, type VtExports } from './abi';
+import {
+  Abi,
+  GHOSTTY_NO_VALUE,
+  GHOSTTY_OUT_OF_SPACE,
+  GHOSTTY_SUCCESS,
+  GhosttyCallError,
+  type VtExports,
+} from './abi';
 import { EventEmitter } from './event-emitter';
 import type { IEvent } from './interfaces';
 import {
@@ -372,6 +379,176 @@ function allocScratch(abi: Abi, layout: CellLayout): ExtractScratch {
  * Scrollback, graphemes, hyperlinks and wrap flags are read through grid
  * references on demand.
  */
+/** A match in screen coordinates: columns, and rows counted from the top of the scrollback. */
+export interface SearchMatch {
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+}
+
+/**
+ * A search of one terminal's screen and scrollback with libghostty-vt's
+ * search: case-insensitive for ASCII letters, kept in sync with the terminal
+ * by `run()` after writes. It never scrolls; the caller shows the selected
+ * match. "Next" moves toward older output (up), as in Ghostty.
+ */
+export class TerminalSearch {
+  private handle: number;
+
+  constructor(
+    private readonly abi: Abi,
+    private readonly terminal: number
+  ) {
+    this.handle = abi.newHandle('ghostty_search_new', (slot) =>
+      abi.call('ghostty_search_new', 0, slot, terminal)
+    );
+    abi.with(4, (ptr) => {
+      abi.view().setInt32(ptr, abi.enumValue('GhosttySearchScroll', 'NONE'), true);
+      abi.check('ghostty_search_set', this.handle, this.option('SELECT_SCROLL'), ptr);
+    });
+  }
+
+  private option(name: string): number {
+    return this.abi.enumValue('GhosttySearchOption', name);
+  }
+
+  private data(name: string): number {
+    return this.abi.enumValue('GhosttySearchData', name);
+  }
+
+  /** Starts a search for `text`, or stops searching when it is empty. */
+  setNeedle(text: string): void {
+    const abi = this.abi;
+    if (!text) {
+      abi.check('ghostty_search_set', this.handle, this.option('NEEDLE'), 0);
+      return;
+    }
+    const bytes = new TextEncoder().encode(text);
+    abi.withBytes(bytes, (ptr, len) =>
+      abi.with(abi.sizeOf('GhosttyString'), (str) => {
+        const view = abi.view();
+        view.setUint32(str + abi.offset('GhosttyString', 'ptr'), ptr, true);
+        view.setUint32(str + abi.offset('GhosttyString', 'len'), len, true);
+        abi.check('ghostty_search_set', this.handle, this.option('NEEDLE'), str);
+      })
+    );
+  }
+
+  /** Catches up with everything written to the terminal since the last run. */
+  run(): void {
+    this.abi.check('ghostty_search_run', this.handle);
+  }
+
+  /** Selects the next older (`older`) or newer match, wrapping; false when there are none. */
+  select(older: boolean): boolean {
+    const result = this.abi.call(
+      'ghostty_search_set',
+      this.handle,
+      this.option(older ? 'SELECT_NEXT' : 'SELECT_PREV'),
+      0
+    );
+    if (result === GHOSTTY_NO_VALUE) return false;
+    if (result !== GHOSTTY_SUCCESS) throw new GhosttyCallError('ghostty_search_set', result);
+    return true;
+  }
+
+  total(): number {
+    return this.readU32('TOTAL_MATCHES') ?? 0;
+  }
+
+  /** Index of the selected match, newest first (0 is the newest), or null. */
+  selectedIndex(): number | null {
+    return this.readU32('SELECTED_INDEX');
+  }
+
+  private readU32(name: string): number | null {
+    const abi = this.abi;
+    return abi.with(8, (ptr) => {
+      const result = abi.call('ghostty_search_get', this.handle, this.data(name), ptr);
+      if (result === GHOSTTY_NO_VALUE) return null;
+      if (result !== GHOSTTY_SUCCESS) throw new GhosttyCallError('ghostty_search_get', result);
+      return abi.view().getUint32(ptr, true);
+    });
+  }
+
+  selected(): SearchMatch | null {
+    const abi = this.abi;
+    return abi.withSized('GhosttySelection', (sel) => {
+      const result = abi.call('ghostty_search_get', this.handle, this.data('SELECTED_MATCH'), sel);
+      if (result === GHOSTTY_NO_VALUE) return null;
+      if (result !== GHOSTTY_SUCCESS) throw new GhosttyCallError('ghostty_search_get', result);
+      return this.toMatch(sel);
+    });
+  }
+
+  /** Every match, newest first, read right after `run()` and before the next write. */
+  matches(): SearchMatch[] {
+    const abi = this.abi;
+    const selSize = abi.sizeOf('GhosttySelection');
+    const bufSize = abi.sizeOf('GhosttySelectionBuffer');
+    const at = (buf: number, field: string) => buf + abi.offset('GhosttySelectionBuffer', field);
+    return abi.with(bufSize, (buf) => {
+      const query = abi.call('ghostty_search_get', this.handle, this.data('MATCHES'), buf);
+      if (query === GHOSTTY_SUCCESS) return [];
+      if (query !== GHOSTTY_OUT_OF_SPACE) {
+        if (query === GHOSTTY_NO_VALUE) return [];
+        throw new GhosttyCallError('ghostty_search_get', query);
+      }
+      const count = abi.view().getUint32(at(buf, 'len'), true);
+      return abi.with(count * selSize, (items) => {
+        for (let i = 0; i < count; i++) {
+          abi.view().setUint32(items + i * selSize, selSize, true);
+        }
+        const view = abi.view();
+        view.setUint32(at(buf, 'ptr'), items, true);
+        view.setUint32(at(buf, 'cap'), count, true);
+        abi.check('ghostty_search_get', this.handle, this.data('MATCHES'), buf);
+        const len = abi.view().getUint32(at(buf, 'len'), true);
+        const out: SearchMatch[] = [];
+        for (let i = 0; i < len; i++) {
+          const match = this.toMatch(items + i * selSize);
+          if (match) out.push(match);
+        }
+        return out;
+      });
+    });
+  }
+
+  private toMatch(sel: number): SearchMatch | null {
+    const abi = this.abi;
+    const start = this.screenPoint(sel + abi.offset('GhosttySelection', 'start'));
+    const end = this.screenPoint(sel + abi.offset('GhosttySelection', 'end'));
+    if (!start || !end) return null;
+    return { startX: start.x, startY: start.y, endX: end.x, endY: end.y };
+  }
+
+  private screenPoint(ref: number): { x: number; y: number } | null {
+    const abi = this.abi;
+    return abi.with(abi.sizeOf('GhosttyPointCoordinate'), (out) => {
+      const result = abi.call(
+        'ghostty_terminal_point_from_grid_ref',
+        this.terminal,
+        ref,
+        abi.enumValue('GhosttyPointTag', 'SCREEN'),
+        out
+      );
+      if (result !== GHOSTTY_SUCCESS) return null;
+      const view = abi.view();
+      return {
+        x: view.getUint16(out + abi.offset('GhosttyPointCoordinate', 'x'), true),
+        y: view.getUint32(out + abi.offset('GhosttyPointCoordinate', 'y'), true),
+      };
+    });
+  }
+
+  free(): void {
+    if (!this.handle) return;
+    this.abi.call('ghostty_search_free', this.handle);
+    this.handle = 0;
+  }
+}
+
 export class GhosttyTerminal {
   private handle: number;
   private renderState: number;
@@ -449,7 +626,7 @@ export class GhosttyTerminal {
     this.setOption('WRITE_PTY', writePty);
     this.installHooks();
     this.setModeDefault(GRAPHEME_CLUSTER_MODE, true);
-    if (config) this.applyConfig(config);
+    if (config) this.configure(config);
     this.initCellPool();
   }
 
@@ -458,6 +635,11 @@ export class GhosttyTerminal {
   }
   get rows(): number {
     return this._rows;
+  }
+
+  /** A new search of this terminal; free it before or after the terminal. */
+  createSearch(): TerminalSearch {
+    return new TerminalSearch(this.abi, this.handle);
   }
 
   /** The raw libghostty-vt terminal handle, for APIs this class does not wrap yet. */
@@ -811,7 +993,11 @@ export class GhosttyTerminal {
   // Private helpers
   // ==========================================================================
 
-  private applyConfig(config: GhosttyTerminalConfig): void {
+  /**
+   * Applies scrollback and color settings. Colors take effect on the whole
+   * screen at the next update; programs can still change them (OSC 4/10/11).
+   */
+  configure(config: GhosttyTerminalConfig): void {
     const abi = this.abi;
     if (config.scrollbackLimit !== undefined) {
       abi.with(4, (ptr) => {
@@ -820,7 +1006,7 @@ export class GhosttyTerminal {
       });
     }
     const setRgb = (option: string, color: number | undefined) => {
-      if (!color) return;
+      if (color === undefined) return;
       abi.with(4, (ptr) => {
         const view = abi.view();
         view.setUint8(ptr, (color >> 16) & 0xff);
@@ -832,7 +1018,7 @@ export class GhosttyTerminal {
     setRgb('COLOR_FOREGROUND', config.fgColor);
     setRgb('COLOR_BACKGROUND', config.bgColor);
     setRgb('COLOR_CURSOR', config.cursorColor);
-    if (config.palette?.some((c) => c)) {
+    if (config.palette?.some((c) => c !== undefined)) {
       const size = 256 * 3;
       abi.with(size, (ptr) => {
         abi.check(
@@ -843,7 +1029,7 @@ export class GhosttyTerminal {
         );
         const view = abi.view();
         config.palette!.slice(0, 16).forEach((color, i) => {
-          if (!color) return;
+          if (color === undefined) return;
           view.setUint8(ptr + i * 3, (color >> 16) & 0xff);
           view.setUint8(ptr + i * 3 + 1, (color >> 8) & 0xff);
           view.setUint8(ptr + i * 3 + 2, color & 0xff);
@@ -851,6 +1037,8 @@ export class GhosttyTerminal {
         this.setOption('COLOR_PALETTE', ptr);
       });
     }
+    this.changed = true;
+    this.dirty = DirtyState.FULL;
   }
 
   private installHooks(): void {
@@ -1027,6 +1215,36 @@ export class GhosttyTerminal {
         cursor: view.getUint8(at('cursor_has_value')) ? rgbAt(view, at('cursor')) : null,
         palette,
       };
+    });
+    this.readTerminalColors();
+  }
+
+  /**
+   * The render state does not pick up default colors set with
+   * ghostty_terminal_set, so the effective colors (a program's OSC override,
+   * else the default) are read from the terminal itself.
+   */
+  private readTerminalColors(): void {
+    const abi = this.abi;
+    const data = (name: string) => abi.enumValue('GhosttyTerminalData', name);
+    const rgb = (name: string): RGB | null =>
+      abi.with(4, (ptr) =>
+        abi.call('ghostty_terminal_get', this.handle, data(name), ptr) === GHOSTTY_SUCCESS
+          ? rgbAt(abi.view(), ptr)
+          : null
+      );
+    this.colors.background = rgb('COLOR_BACKGROUND') ?? this.colors.background;
+    this.colors.foreground = rgb('COLOR_FOREGROUND') ?? this.colors.foreground;
+    this.colors.cursor = rgb('COLOR_CURSOR') ?? this.colors.cursor;
+    abi.with(256 * 3, (ptr) => {
+      if (
+        abi.call('ghostty_terminal_get', this.handle, data('COLOR_PALETTE'), ptr) !==
+        GHOSTTY_SUCCESS
+      ) {
+        return;
+      }
+      const view = abi.view();
+      for (let i = 0; i < 256; i++) this.colors.palette[i] = rgbAt(view, ptr + i * 3);
     });
   }
 

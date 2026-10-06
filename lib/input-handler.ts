@@ -195,6 +195,13 @@ export class InputHandler {
   private wheelListener: ((e: WheelEvent) => void) | null = null;
   private isComposing = false;
   private isDisposed = false;
+  /**
+   * On macOS, whether Option acts as Meta (ESC prefix) instead of composing a
+   * character (Option+A types 'å'). Elsewhere Alt always acts as Meta.
+   */
+  macOptionIsMeta = false;
+  private readonly isMac =
+    typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform ?? '');
   private mouseButtonsPressed = 0; // Track which buttons are pressed for motion reporting
   private lastKeyDownData: string | null = null;
   private lastKeyDownTime = 0;
@@ -233,6 +240,7 @@ export class InputHandler {
     mouseConfig?: MouseTrackingConfig
   ) {
     this.encoder = ghostty.createKeyEncoder();
+    this.encoder.setOption(KeyEncoderOption.ALT_ESC_PREFIX, true);
     this.container = container;
     this.inputElement = inputElement;
     this.onDataCallback = onData;
@@ -345,6 +353,18 @@ export class InputHandler {
     return mods;
   }
 
+  /** macOS Option without Ctrl or Cmd composes a character unless Option is Meta. */
+  private optionComposes(event: KeyboardEvent): boolean {
+    return (
+      this.isMac &&
+      !this.macOptionIsMeta &&
+      event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      event.key.length === 1
+    );
+  }
+
   /**
    * Check if this is a printable character with no special modifiers
    * @param event - KeyboardEvent
@@ -404,6 +424,13 @@ export class InputHandler {
       if (this.onCopyCallback && this.onCopyCallback()) {
         event.preventDefault();
       }
+      return;
+    }
+
+    if (this.optionComposes(event)) {
+      event.preventDefault();
+      this.onDataCallback(event.key);
+      this.recordKeyDownData(event.key);
       return;
     }
 
@@ -532,7 +559,9 @@ export class InputHandler {
       const utf8 =
         event.key.length === 1 && event.key.charCodeAt(0) < 128
           ? event.key.toLowerCase() // Use lowercase for consistency
-          : undefined;
+          : event.altKey
+            ? baseCharacter(event.code)
+            : undefined;
 
       const encoded = this.encoder.encode({
         action,
@@ -1113,4 +1142,16 @@ export class InputHandler {
   isActive(): boolean {
     return !this.isDisposed;
   }
+}
+
+/**
+ * The character a letter or digit key types without modifiers, from its
+ * physical code: Alt as Meta sends ESC and this even when the layout makes
+ * Alt+key type something else (macOS Option+A types 'å').
+ */
+function baseCharacter(code: string): string | undefined {
+  const letter = /^Key([A-Z])$/.exec(code);
+  if (letter) return letter[1].toLowerCase();
+  const digit = /^Digit([0-9])$/.exec(code);
+  return digit ? digit[1] : undefined;
 }

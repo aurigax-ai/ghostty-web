@@ -489,6 +489,38 @@ describe('InputHandler', () => {
     });
   });
 
+  describe('macOS Option', () => {
+    const platform = Object.getOwnPropertyDescriptor(Navigator.prototype, 'platform');
+
+    function macHandler(): InputHandler {
+      Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true });
+      try {
+        return new InputHandler(
+          ghostty,
+          container as any,
+          (data) => dataReceived.push(data),
+          () => {}
+        );
+      } finally {
+        Reflect.deleteProperty(navigator, 'platform');
+        if (platform) Object.defineProperty(Navigator.prototype, 'platform', platform);
+      }
+    }
+
+    test('composes the character Option produces by default', () => {
+      macHandler();
+      simulateKey(container, createKeyEvent('KeyA', 'å', { alt: true }));
+      expect(dataReceived).toEqual(['å']);
+    });
+
+    test('sends ESC and the key when Option is Meta', () => {
+      const handler = macHandler();
+      handler.macOptionIsMeta = true;
+      simulateKey(container, createKeyEvent('KeyA', 'å', { alt: true }));
+      expect(dataReceived).toEqual(['\x1ba']);
+    });
+  });
+
   describe('Control Characters', () => {
     test('encodes Ctrl+A', () => {
       const handler = new InputHandler(
@@ -1001,9 +1033,7 @@ describe('InputHandler', () => {
 
       simulateKey(container, createKeyEvent('KeyA', 'a', { alt: true }));
 
-      expect(dataReceived.length).toBe(1);
-      // Alt+A often produces ESC a or similar
-      expect(dataReceived[0].length).toBeGreaterThan(0);
+      expect(dataReceived).toEqual(['\x1ba']);
     });
   });
 

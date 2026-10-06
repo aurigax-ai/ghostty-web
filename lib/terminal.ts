@@ -30,6 +30,7 @@ import {
 import { getGhostty } from './index';
 import { InputHandler, type MouseTrackingConfig } from './input-handler';
 import type {
+  FontWeight,
   IBufferNamespace,
   IBufferRange,
   IDisposable,
@@ -44,7 +45,13 @@ import { LinkDetector } from './link-detector';
 import { type IMarker, Marker } from './marker';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
-import { CanvasRenderer, type RendererOptions, type TerminalRenderer } from './renderer';
+import {
+  CanvasRenderer,
+  type RendererOptions,
+  type SearchHighlight,
+  type SearchHighlightColors,
+  type TerminalRenderer,
+} from './renderer';
 import { SelectionManager } from './selection-manager';
 import type { ILink, ILinkProvider } from './types';
 import { WebglRenderer } from './webgl-renderer';
@@ -97,6 +104,7 @@ export class Terminal implements ITerminalCore {
   private scrollEmitter = new EventEmitter<number>();
   private renderEmitter = new EventEmitter<{ start: number; end: number }>();
   private cursorMoveEmitter = new EventEmitter<void>();
+  private writeParsedEmitter = new EventEmitter<void>();
   // Public event accessors (xterm.js compatibility)
   public readonly onData: IEvent<string> = this.dataEmitter.event;
   public readonly onResize: IEvent<{ cols: number; rows: number }> = this.resizeEmitter.event;
@@ -107,6 +115,8 @@ export class Terminal implements ITerminalCore {
   public readonly onScroll: IEvent<number> = this.scrollEmitter.event;
   public readonly onRender: IEvent<{ start: number; end: number }> = this.renderEmitter.event;
   public readonly onCursorMove: IEvent<void> = this.cursorMoveEmitter.event;
+  /** Fires after written data was parsed, as xterm.js's onWriteParsed. */
+  public readonly onWriteParsed: IEvent<void> = this.writeParsedEmitter.event;
 
   private pwdEmitter = new EventEmitter<string>();
   private semanticPromptEmitter = new EventEmitter<SemanticPromptEvent>();
@@ -188,10 +198,17 @@ export class Terminal implements ITerminalCore {
       fontSize: options.fontSize ?? 15,
       fontFamily: options.fontFamily ?? 'monospace',
       allowTransparency: options.allowTransparency ?? false,
+      linkHandler: options.linkHandler ?? null,
       renderer: options.renderer ?? 'webgl',
       convertEol: options.convertEol ?? false,
       disableStdin: options.disableStdin ?? false,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
+      fontWeight: options.fontWeight ?? 'normal',
+      fontWeightBold: options.fontWeightBold ?? 'bold',
+      lineHeight: options.lineHeight ?? 1,
+      scrollSensitivity: options.scrollSensitivity ?? 1,
+      minimumContrastRatio: options.minimumContrastRatio ?? 1,
+      macOptionIsMeta: options.macOptionIsMeta ?? false,
     };
 
     // Wrap in Proxy to intercept runtime changes (xterm.js compatibility)
@@ -243,9 +260,35 @@ export class Terminal implements ITerminalCore {
         break;
 
       case 'theme':
-        if (this.renderer) {
-          console.warn('ghostty-web: theme changes after open() are not yet fully supported');
+        this.wasmTerm?.configure(this.themeConfig());
+        if (this.renderer && this.wasmTerm) {
+          this.renderer.setTheme(this.options.theme);
+          this.renderer.render(this.wasmTerm, true, this.viewportY, this, this.scrollbarOpacity);
         }
+        break;
+
+      case 'macOptionIsMeta':
+        if (this.inputHandler) this.inputHandler.macOptionIsMeta = this.options.macOptionIsMeta;
+        break;
+
+      case 'fontWeight':
+      case 'fontWeightBold':
+      case 'lineHeight':
+        if (this.renderer) {
+          this.renderer.setFontOptions(this.fontOptions());
+          this.handleFontChange();
+        }
+        break;
+
+      case 'minimumContrastRatio':
+        if (this.renderer && this.wasmTerm) {
+          this.renderer.setMinimumContrastRatio(this.options.minimumContrastRatio);
+          this.renderer.render(this.wasmTerm, true, this.viewportY, this, this.scrollbarOpacity);
+        }
+        break;
+
+      case 'scrollback':
+        this.wasmTerm?.configure({ scrollbackLimit: this.options.scrollback });
         break;
 
       case 'fontSize':
@@ -293,72 +336,57 @@ export class Terminal implements ITerminalCore {
    * Parse a CSS color string to 0xRRGGBB format.
    * Returns 0 if the color is undefined or invalid.
    */
-  private parseColorToHex(color?: string): number {
-    if (!color) return 0;
-
-    // Handle hex colors (#RGB, #RRGGBB)
+  private parseColorToHex(color?: string): number | undefined {
+    if (!color) return undefined;
     if (color.startsWith('#')) {
       let hex = color.slice(1);
-      if (hex.length === 3) {
+      if (hex.length === 3 || hex.length === 4) {
         hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
       }
-      const value = Number.parseInt(hex, 16);
-      return Number.isNaN(value) ? 0 : value;
+      const value = Number.parseInt(hex.slice(0, 6), 16);
+      return hex.length >= 6 && !Number.isNaN(value) ? value : undefined;
     }
-
-    // Handle rgb(r, g, b) format
-    const match = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+    const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
     if (match) {
       const r = Number.parseInt(match[1], 10);
       const g = Number.parseInt(match[2], 10);
       const b = Number.parseInt(match[3], 10);
       return (r << 16) | (g << 8) | b;
     }
-
-    return 0;
+    return undefined;
   }
 
-  /**
-   * Convert terminal options to WASM terminal config.
-   */
-  private buildWasmConfig(): GhosttyTerminalConfig | undefined {
+  /** Theme colors in the form libghostty-vt takes; a color the theme leaves out keeps Ghostty's default. */
+  private themeConfig(): GhosttyTerminalConfig {
     const theme = this.options.theme;
-    const scrollback = this.options.scrollback;
-
-    // If no theme and default scrollback, use defaults
-    if (!theme && scrollback === 10000) {
-      return undefined;
-    }
-
-    // Build palette array from theme colors
-    // Order: black, red, green, yellow, blue, magenta, cyan, white,
-    //        brightBlack, brightRed, brightGreen, brightYellow, brightBlue, brightMagenta, brightCyan, brightWhite
-    const palette: number[] = [
-      this.parseColorToHex(theme?.black),
-      this.parseColorToHex(theme?.red),
-      this.parseColorToHex(theme?.green),
-      this.parseColorToHex(theme?.yellow),
-      this.parseColorToHex(theme?.blue),
-      this.parseColorToHex(theme?.magenta),
-      this.parseColorToHex(theme?.cyan),
-      this.parseColorToHex(theme?.white),
-      this.parseColorToHex(theme?.brightBlack),
-      this.parseColorToHex(theme?.brightRed),
-      this.parseColorToHex(theme?.brightGreen),
-      this.parseColorToHex(theme?.brightYellow),
-      this.parseColorToHex(theme?.brightBlue),
-      this.parseColorToHex(theme?.brightMagenta),
-      this.parseColorToHex(theme?.brightCyan),
-      this.parseColorToHex(theme?.brightWhite),
-    ];
-
+    const palette = [
+      theme?.black,
+      theme?.red,
+      theme?.green,
+      theme?.yellow,
+      theme?.blue,
+      theme?.magenta,
+      theme?.cyan,
+      theme?.white,
+      theme?.brightBlack,
+      theme?.brightRed,
+      theme?.brightGreen,
+      theme?.brightYellow,
+      theme?.brightBlue,
+      theme?.brightMagenta,
+      theme?.brightCyan,
+      theme?.brightWhite,
+    ].map((color) => this.parseColorToHex(color));
     return {
-      scrollbackLimit: scrollback,
       fgColor: this.parseColorToHex(theme?.foreground),
       bgColor: this.parseColorToHex(theme?.background),
       cursorColor: this.parseColorToHex(theme?.cursor),
       palette,
     };
+  }
+
+  private buildWasmConfig(): GhosttyTerminalConfig {
+    return { ...this.themeConfig(), scrollbackLimit: this.options.scrollback };
   }
 
   // ==========================================================================
@@ -506,6 +534,7 @@ export class Terminal implements ITerminalCore {
         this.textarea,
         mouseConfig
       );
+      this.inputHandler.macOptionIsMeta = this.options.macOptionIsMeta;
 
       // Create selection manager (pass textarea for context menu positioning)
       this.selectionManager = new SelectionManager(
@@ -567,8 +596,22 @@ export class Terminal implements ITerminalCore {
     return this.renderer instanceof WebglRenderer ? 'webgl' : 'canvas';
   }
 
+  private fontOptions(): {
+    fontWeight: FontWeight;
+    fontWeightBold: FontWeight;
+    lineHeight: number;
+  } {
+    return {
+      fontWeight: this.options.fontWeight,
+      fontWeightBold: this.options.fontWeightBold,
+      lineHeight: this.options.lineHeight,
+    };
+  }
+
   private rendererOptions(): RendererOptions {
     return {
+      ...this.fontOptions(),
+      minimumContrastRatio: this.options.minimumContrastRatio,
       fontSize: this.options.fontSize,
       fontFamily: this.options.fontFamily,
       cursorStyle: this.options.cursorStyle,
@@ -589,7 +632,7 @@ export class Terminal implements ITerminalCore {
       }
     }
     renderer ??= new CanvasRenderer(this.canvas!, this.rendererOptions());
-    renderer.onNeedsFrame = () => this.wake();
+    renderer.onNeedsFrame = () => this.requestFrame();
     return renderer;
   }
 
@@ -599,8 +642,9 @@ export class Terminal implements ITerminalCore {
     const hoveredLink = this.renderer.getHoveredHyperlinkId();
     this.renderer.dispose();
     const renderer = new CanvasRenderer(this.canvas, this.rendererOptions());
-    renderer.onNeedsFrame = () => this.wake();
+    renderer.onNeedsFrame = () => this.requestFrame();
     renderer.setHoveredHyperlinkId(hoveredLink);
+    renderer.setSearchHighlights(this.searchHighlights.list, this.searchHighlights.colors);
     if (this.selectionManager) {
       renderer.setSelectionManager(this.selectionManager);
       this.selectionManager.setRenderer(renderer);
@@ -1035,16 +1079,18 @@ export class Terminal implements ITerminalCore {
     }
   }
 
-  /**
-   * Scroll viewport to a specific line in the buffer
-   * @param line Line number (0 = top of scrollback, scrollbackLength = bottom)
-   */
   /** Scrolls so that absolute buffer line `line` (0 = oldest scrollback line) is at the top, like xterm.js. */
   public scrollToLine(line: number): void {
-    this.wake();
     const scrollbackLength = this.getScrollbackLength();
     const top = Math.max(0, Math.min(scrollbackLength, Math.round(line)));
-    const newViewportY = scrollbackLength - top;
+    this.scrollToViewportY(scrollbackLength - top);
+  }
+
+  /** Scrolls to `viewportY` lines above the bottom. */
+  private scrollToViewportY(viewportY: number): void {
+    this.wake();
+    const scrollbackLength = this.getScrollbackLength();
+    const newViewportY = Math.max(0, Math.min(scrollbackLength, Math.round(viewportY)));
 
     if (newViewportY !== this.viewportY) {
       this.viewportY = newViewportY;
@@ -1201,6 +1247,7 @@ export class Terminal implements ITerminalCore {
     this.scrollEmitter.dispose();
     this.renderEmitter.dispose();
     this.cursorMoveEmitter.dispose();
+    this.writeParsedEmitter.dispose();
   }
 
   // ==========================================================================
@@ -1663,6 +1710,8 @@ export class Terminal implements ITerminalCore {
         deltaLines = e.deltaY / 33;
       }
 
+      deltaLines *= this.options.scrollSensitivity;
+
       // Use smooth scrolling for any amount (no rounding needed)
       if (deltaLines !== 0) {
         // Calculate target position
@@ -1728,7 +1777,7 @@ export class Terminal implements ITerminalCore {
         const relativeY = mouseY - scrollbarPadding;
         const scrollFraction = 1 - relativeY / scrollbarTrackHeight; // Inverted: top = 1, bottom = 0
         const targetViewportY = Math.round(scrollFraction * scrollbackLength);
-        this.scrollToLine(Math.max(0, Math.min(scrollbackLength, targetViewportY)));
+        this.scrollToViewportY(targetViewportY);
       }
     }
   };
@@ -1786,7 +1835,7 @@ export class Terminal implements ITerminalCore {
     const viewportDelta = Math.round(scrollFraction * scrollbackLength);
 
     const newViewportY = this.scrollbarDragStartViewportY + viewportDelta;
-    this.scrollToLine(Math.max(0, Math.min(scrollbackLength, newViewportY)));
+    this.scrollToViewportY(newViewportY);
   }
 
   /**
@@ -1965,6 +2014,13 @@ export class Terminal implements ITerminalCore {
     };
   }
 
+  /** Draws one frame, for a change that needs no follow-up frames (a cursor blink). */
+  private requestFrame(): void {
+    if (this.animationFrameId) return;
+    this.idleFrames = Terminal.IDLE_FRAMES_BEFORE_SLEEP;
+    if (this.isOpen && !this.isDisposed) this.startRenderLoop();
+  }
+
   /** Keeps the render loop running for a while; called whenever something may need drawing. */
   public wake(): void {
     this.idleFrames = 0;
@@ -1999,6 +2055,19 @@ export class Terminal implements ITerminalCore {
       (this.buffer as BufferNamespace)._fireBufferChange(this.buffer.active);
     }
     for (const marker of [...this.markers]) marker.refresh();
+    this.writeParsedEmitter.fire();
+    this.wake();
+  }
+
+  private searchHighlights: {
+    list: SearchHighlight[] | null;
+    colors?: SearchHighlightColors;
+  } = { list: null };
+
+  /** Shows search matches on viewport rows (null clears them). Used by SearchAddon. */
+  setSearchHighlights(list: SearchHighlight[] | null, colors?: SearchHighlightColors): void {
+    this.searchHighlights = { list, colors: colors ?? this.searchHighlights.colors };
+    this.renderer?.setSearchHighlights(list, colors);
     this.wake();
   }
 

@@ -394,7 +394,8 @@ export interface GhosttyTerminalConfig {
   fgColor?: number;
   bgColor?: number;
   cursorColor?: number;
-  palette?: number[];
+  /** The 16 ANSI colors; an undefined entry keeps Ghostty's default. */
+  palette?: (number | undefined)[];
 }
 
 /**
