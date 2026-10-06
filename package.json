@@ -3,14 +3,14 @@
   "version": "0.0.0",
   "description": "Ghostty's terminal engine (libghostty-vt) in the browser: WebAssembly build, an xterm.js-shaped API and a canvas renderer. A hard fork of coder/ghostty-web.",
   "type": "module",
-  "main": "./dist/ghostty-web.umd.cjs",
-  "module": "./dist/ghostty-web.js",
+  "main": "./dist/ostia-ghostty.umd.cjs",
+  "module": "./dist/ostia-ghostty.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/ghostty-web.js",
-      "require": "./dist/ghostty-web.umd.cjs"
+      "import": "./dist/ostia-ghostty.js",
+      "require": "./dist/ostia-ghostty.umd.cjs"
     },
     "./ghostty-vt.wasm": "./ghostty-vt.wasm"
   },

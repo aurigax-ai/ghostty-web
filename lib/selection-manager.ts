@@ -326,8 +326,7 @@ export class SelectionManager {
    * xterm.js compatible API
    */
   getSelectionPosition():
-    | { start: { x: number; y: number }; end: { x: number; y: number } }
-    | undefined {
+    { start: { x: number; y: number }; end: { x: number; y: number } } | undefined {
     const coords = this.normalizeSelection();
     if (!coords) return undefined;
 

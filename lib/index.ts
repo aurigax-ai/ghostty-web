@@ -40,13 +40,13 @@ export async function init(): Promise<void> {
 export function getGhostty(): Ghostty {
   if (!ghosttyInstance) {
     throw new Error(
-      'ghostty-web not initialized. Call init() before creating Terminal instances.\n' +
+      'ostia-ghostty not initialized. Call init() before creating Terminal instances.\n' +
         'Example:\n' +
-        '  import { init, Terminal } from "ghostty-web";\n' +
+        '  import { init, Terminal } from "@aurigax-ai/ostia-ghostty";\n' +
         '  await init();\n' +
         '  const term = new Terminal();\n\n' +
         'For tests, pass a Ghostty instance directly:\n' +
-        '  import { Ghostty, Terminal } from "ghostty-web";\n' +
+        '  import { Ghostty, Terminal } from "@aurigax-ai/ostia-ghostty";\n' +
         '  const ghostty = await Ghostty.load();\n' +
         '  const term = new Terminal({ ghostty });'
     );
@@ -79,6 +79,7 @@ export {
   DirtyState,
   KeyEncoderOption,
 } from './ghostty';
+export { Abi, GhosttyCallError } from './abi';
 export { Key, KeyAction, Mods } from './types';
 export type { KeyEvent, GhosttyCell, RGB, Cursor, TerminalHandle } from './types';
 

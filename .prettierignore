@@ -4,6 +4,7 @@ coverage/
 *.wasm
 .git/
 .vite/
-bun.lock
 CHANGELOG.md
-ghostty/
+pnpm-lock.yaml
+vendor
+ghostty-vt.wasm

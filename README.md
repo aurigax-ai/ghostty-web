@@ -1,89 +1,52 @@
-# ghostty-web
+# ostia-ghostty
 
-[![NPM Version](https://img.shields.io/npm/v/ghostty-web)](https://npmjs.com/package/ghostty-web) [![NPM Downloads](https://img.shields.io/npm/dw/ghostty-web)](https://npmjs.com/package/ghostty-web) [![npm bundle size](https://img.shields.io/bundlephobia/minzip/ghostty-web)](https://npmjs.com/package/ghostty-web) [![license](https://img.shields.io/github/license/coder/ghostty-web)](./LICENSE)
+[Ghostty](https://github.com/ghostty-org/ghostty)'s terminal engine in the browser, with an
+[xterm.js](https://github.com/xtermjs/xterm.js)-shaped API and a canvas renderer. It is the engine
+behind the Ghostty terminal in Ostia.
 
-[Ghostty](https://github.com/ghostty-org/ghostty) for the web with [xterm.js](https://github.com/xtermjs/xterm.js) API compatibility — giving you a proper VT100 implementation in the browser.
+This is a hard fork of [coder/ghostty-web](https://github.com/coder/ghostty-web) (MIT, © Coder),
+kept with its history. It does not track upstream. What changed:
 
-- Migrate from xterm by changing your import: `@xterm/xterm` → `ghostty-web`
-- WASM-compiled parser from Ghostty—the same code that runs the native app
-- Zero runtime dependencies, ~400KB WASM bundle
+- **Official, unpatched libghostty-vt.** ghostty-web built Ghostty with a patch that added its own
+  C functions. This fork builds Ghostty's published libghostty-vt API at a pinned commit
+  (`GHOSTTY_COMMIT`) and talks to it through `lib/abi.ts`, which reads struct layouts from
+  `ghostty_type_json()` so a field that moves fails loudly instead of reading garbage.
+- **Host hooks.** JavaScript callbacks reach libghostty-vt through its growable function table
+  (`Abi.addCallback`), so the host can receive prompt marks (OSC 133), the working directory with
+  its host (OSC 7), notifications, clipboard writes and unknown sequences, and keep markers as
+  tracked grid references.
+- **pnpm and Vitest** instead of Bun; no demo server, benchmark or release automation.
 
-Originally created for [Mux](https://github.com/coder/mux) (a desktop app for isolated, parallel agentic development), but designed to be used anywhere.
+## Build
 
-## Try It
+Needs [Zig](https://ziglang.org) 0.16.0 and pnpm.
 
-- [Live Demo](https://ghostty.ondis.co) on an ephemeral VM (thank you to Greg from [disco.cloud](https://disco.cloud) for hosting).
-
-- On your computer:
-
-  ```bash
-  npx @ghostty-web/demo@next
-  ```
-
-  This starts a loopback-only HTTP server with a real shell on `http://127.0.0.1:8080`. The demo protects `/ws` with a per-run same-origin token and rejects cross-origin WebSocket handshakes. Works best on Linux and macOS.
-
-  To intentionally bind somewhere else, set `HOST=<host>`. If you serve the demo through extra hostnames or a wildcard bind such as `HOST=0.0.0.0`, also set `GHOSTTY_ALLOWED_HOSTS=host1,host2`. Avoid remote exposure unless you understand the risk: the demo starts a real local shell.
-
-![ghostty](https://github.com/user-attachments/assets/aceee7eb-d57b-4d89-ac3d-ee1885d0187a)
-
-## Comparison with xterm.js
-
-xterm.js is everywhere—VS Code, Hyper, countless web terminals. But it has fundamental issues:
-
-| Issue                                    | xterm.js                                                         | ghostty-web                |
-| ---------------------------------------- | ---------------------------------------------------------------- | -------------------------- |
-| **Complex scripts** (Devanagari, Arabic) | Rendering issues                                                 | ✓ Proper grapheme handling |
-| **XTPUSHSGR/XTPOPSGR**                   | [Not supported](https://github.com/xtermjs/xterm.js/issues/2570) | ✓ Full support             |
-
-xterm.js reimplements terminal emulation in JavaScript. Every escape sequence, every edge case, every Unicode quirk—all hand-coded. Ghostty's emulator is the same battle-tested code that runs the native Ghostty app.
-
-## Installation
-
-```bash
-npm install ghostty-web
+```sh
+pnpm install
+pnpm build:wasm   # clones Ghostty at GHOSTTY_COMMIT into vendor/ and builds ghostty-vt.wasm
+pnpm test
+pnpm build        # dist/ with the library and the WASM
 ```
 
-## Usage
+libghostty-vt's API is not stable yet, so `GHOSTTY_COMMIT` is raised on purpose, with the tests as
+the guard.
 
-ghostty-web aims to be API-compatible with the xterm.js API.
+## Use
 
-```javascript
-import { init, Terminal } from 'ghostty-web';
+```ts
+import { Ghostty, Terminal, FitAddon } from '@aurigax-ai/ostia-ghostty';
 
-await init();
-
-const term = new Terminal({
-  fontSize: 14,
-  theme: {
-    background: '#1a1b26',
-    foreground: '#a9b1d6',
-  },
-});
-
-term.open(document.getElementById('terminal'));
-term.onData((data) => websocket.send(data));
-websocket.onmessage = (e) => term.write(e.data);
+const ghostty = await Ghostty.fromBytes(wasmBytes);
+const term = new Terminal({ ghostty, fontSize: 14 });
+const fit = new FitAddon();
+term.loadAddon(fit);
+term.open(element);
+fit.fit();
+term.onData((data) => pty.write(data));
+pty.onData((data) => term.write(data));
 ```
-
-For a comprehensive client <-> server example, refer to the [demo](./demo/index.html#L141).
-
-## Development
-
-ghostty-web builds from Ghostty's source with a [patch](./patches/ghostty-wasm-api.patch) to expose additional
-functionality.
-
-> Requires Zig and Bun.
-
-```bash
-bun run build
-```
-
-Mitchell Hashimoto (author of Ghostty) has [been working](https://mitchellh.com/writing/libghostty-is-coming) on `libghostty` which makes this all possible. The patches are very minimal thanks to the work the Ghostty team has done, and we expect them to get smaller.
-
-This library will eventually consume a native Ghostty WASM distribution once available, and will continue to provide an xterm.js compatible API.
-
-At Coder we're big fans of Ghostty, so kudos to that team for all the amazing work.
 
 ## License
 
-[MIT](./LICENSE)
+MIT. See [LICENSE](./LICENSE). Ghostty is MIT licensed by Mitchell Hashimoto and the Ghostty
+contributors.
