@@ -122,6 +122,13 @@ export class Terminal implements ITerminalCore {
   /** OSCs libghostty-vt does not implement, as their content (e.g. `633;E;ls`). */
   public readonly onUnknownOsc: IEvent<string> = this.unknownOscEmitter.event;
 
+  /**
+   * Whether replies to the program's queries (DSR, DA, mode and color reports)
+   * are sent back as data. A host that runs the shell behind a multiplexer which
+   * answers them itself turns this off.
+   */
+  public answerQueries = true;
+
   private engineSubscriptions: IDisposable[] = [];
   private clipboardHandler: ((text: string) => boolean) | null = null;
   private markers = new Set<Marker>();
@@ -1879,6 +1886,7 @@ export class Terminal implements ITerminalCore {
     while (true) {
       const response = this.wasmTerm.readResponse();
       if (response === null) break;
+      if (!this.answerQueries) continue;
       // Send response back to the PTY via onData
       // This is the same path as user keyboard input
       this.dataEmitter.fire(response);

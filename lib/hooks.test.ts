@@ -139,4 +139,14 @@ describe('host hooks', () => {
     expect(tops).toEqual([3]);
     expect(t.buffer.active.getLine(3)?.translateToString(true)).toBe('line 3');
   });
+
+  test('sends query replies as data unless the host turns them off', async () => {
+    const t = await openTerminal();
+    const sent: string[] = [];
+    t.onData((d) => sent.push(d));
+    t.write('\x1b[6n');
+    t.answerQueries = false;
+    t.write('\x1b[6n\x1b[c');
+    expect(sent).toEqual(['\x1b[1;1R']);
+  });
 });
