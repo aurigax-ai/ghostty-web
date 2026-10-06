@@ -24,7 +24,9 @@ import { CellFlags } from './types';
 
 const RECT_WORDS = 5;
 const GLYPH_WORDS = 8;
-const OVERLAY_RECTS = 4;
+const CURSOR_RECTS = 4;
+const SCROLLBAR_RECTS = 2;
+const OVERLAY_RECTS = CURSOR_RECTS + SCROLLBAR_RECTS;
 const ATLAS_START = 512;
 const ATLAS_MAX = 4096;
 const COLORED_SPREAD = 24;
@@ -349,7 +351,7 @@ export class WebglRenderer extends TerminalRenderer {
     gl.bufferData(gl.ARRAY_BUFFER, this.overlayGlyph.byteLength, gl.DYNAMIC_DRAW);
     this.overlayRectVao = this.rectVao(this.overlayRectBuffer, 0);
     this.overlayGlyphVao = this.glyphVaoFor(this.overlayGlyphBuffer);
-    this.scrollbarVao = this.rectVao(this.overlayRectBuffer, RECT_WORDS * 4);
+    this.scrollbarVao = this.rectVao(this.overlayRectBuffer, CURSOR_RECTS * RECT_WORDS * 4);
     this.rectResolution = gl.getUniformLocation(this.rectProgram, 'u_resolution');
     this.glyphResolution = gl.getUniformLocation(this.glyphProgram, 'u_resolution');
     this.glyphAtlasSize = gl.getUniformLocation(this.glyphProgram, 'u_atlas');
@@ -679,7 +681,19 @@ export class WebglRenderer extends TerminalRenderer {
       rects[1] = top;
       rects[2] = width;
       rects[3] = height;
-      if (this.cursorStyle === 'underline') {
+      if (!overlay.focused) {
+        const t = Math.max(1, Math.round(this.devicePixelRatio));
+        const edges = [
+          [left, top, width, t],
+          [left, top + height - t, width, t],
+          [left, top, t, height],
+          [left + width - t, top, t, height],
+        ];
+        edges.forEach((edge, i) => {
+          rects.set(edge, i * RECT_WORDS);
+          colors[i * RECT_WORDS + 4] = theme.cursor;
+        });
+      } else if (this.cursorStyle === 'underline') {
         const h = Math.max(2, Math.floor(height * 0.15));
         rects[1] = top + height - h;
         rects[3] = h;
@@ -687,8 +701,8 @@ export class WebglRenderer extends TerminalRenderer {
         rects[2] = Math.max(2, Math.floor(width * 0.15));
       }
       colors[4] = theme.cursor;
-      key = `${left},${top},${this.cursorStyle}`;
-      if (this.cursorStyle === 'block') {
+      key = `${left},${top},${this.cursorStyle},${overlay.focused}`;
+      if (overlay.focused && this.cursorStyle === 'block') {
         const cell = this.currentBuffer?.getLine(overlay.cursorY)?.[overlay.cursorX];
         if (cell && !isBlank(cell) && !(cell.flags & CellFlags.INVISIBLE)) {
           const entry = this.glyphFor(cell, overlay.cursorX, overlay.cursorY);
@@ -712,13 +726,13 @@ export class WebglRenderer extends TerminalRenderer {
       const dpr = this.devicePixelRatio;
       const opacity = overlay.scrollbarOpacity;
       const base = overlay.viewportY > 0 ? 0.5 : 0.3;
-      const track = RECT_WORDS;
+      const track = CURSOR_RECTS * RECT_WORDS;
       rects[track] = thumb.x * dpr;
       rects[track + 1] = thumb.trackY * dpr;
       rects[track + 2] = thumb.width * dpr;
       rects[track + 3] = thumb.trackHeight * dpr;
       colors[track + 4] = pack(128, 128, 128, Math.round(0.1 * opacity * 255));
-      const bar = RECT_WORDS * 2;
+      const bar = (CURSOR_RECTS + 1) * RECT_WORDS;
       rects[bar] = thumb.x * dpr;
       rects[bar + 1] = thumb.thumbY * dpr;
       rects[bar + 2] = thumb.width * dpr;
@@ -785,7 +799,7 @@ export class WebglRenderer extends TerminalRenderer {
       gl.bindBuffer(gl.ARRAY_BUFFER, this.overlayRectBuffer);
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.overlayRects);
       gl.bindVertexArray(this.overlayRectVao);
-      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, 1);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, CURSOR_RECTS);
       if (this.overlayGlyph[4] > 0) {
         gl.bindBuffer(gl.ARRAY_BUFFER, this.overlayGlyphBuffer);
         gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.overlayGlyph);
@@ -795,7 +809,7 @@ export class WebglRenderer extends TerminalRenderer {
         gl.useProgram(this.rectProgram);
       }
       gl.bindVertexArray(this.scrollbarVao);
-      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, OVERLAY_RECTS - 1);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, SCROLLBAR_RECTS);
     }
     gl.bindVertexArray(null);
   }

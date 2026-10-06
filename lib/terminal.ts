@@ -566,6 +566,8 @@ export class Terminal implements ITerminalCore {
       parent.addEventListener('mousedown', this.handleMouseDown, { capture: true });
       parent.addEventListener('mousemove', this.handleMouseMove);
       parent.addEventListener('mouseleave', this.handleMouseLeave);
+      parent.addEventListener('focusin', this.handleFocusIn);
+      parent.addEventListener('focusout', this.handleFocusOut);
       parent.addEventListener('click', this.handleClick);
 
       // Setup document-level mouseup for scrollbar drag (so drag works even outside canvas)
@@ -633,6 +635,7 @@ export class Terminal implements ITerminalCore {
     }
     renderer ??= new CanvasRenderer(this.canvas!, this.rendererOptions());
     renderer.onNeedsFrame = () => this.requestFrame();
+    renderer.setFocused(this.focused);
     return renderer;
   }
 
@@ -644,6 +647,7 @@ export class Terminal implements ITerminalCore {
     const renderer = new CanvasRenderer(this.canvas, this.rendererOptions());
     renderer.onNeedsFrame = () => this.requestFrame();
     renderer.setHoveredHyperlinkId(hoveredLink);
+    renderer.setFocused(this.focused);
     renderer.setSearchHighlights(this.searchHighlights.list, this.searchHighlights.colors);
     if (this.selectionManager) {
       renderer.setSelectionManager(this.selectionManager);
@@ -1355,6 +1359,8 @@ export class Terminal implements ITerminalCore {
       this.element.removeEventListener('mousedown', this.handleMouseDown, { capture: true });
       this.element.removeEventListener('mousemove', this.handleMouseMove);
       this.element.removeEventListener('mouseleave', this.handleMouseLeave);
+      this.element.removeEventListener('focusin', this.handleFocusIn);
+      this.element.removeEventListener('focusout', this.handleFocusOut);
       this.element.removeEventListener('click', this.handleClick);
 
       // Remove contenteditable and accessibility attributes added in open()
@@ -2012,6 +2018,23 @@ export class Terminal implements ITerminalCore {
       applicationCursorKeysMode: this.wasmTerm?.getMode(1, false) ?? false,
       sendFocusMode: this.wasmTerm?.hasFocusEvents() ?? false,
     };
+  }
+
+  private focused = false;
+
+  private readonly handleFocusIn = (): void => this.setFocused(true);
+
+  private readonly handleFocusOut = (event: FocusEvent): void => {
+    const next = event.relatedTarget;
+    if (next instanceof Node && this.element?.contains(next)) return;
+    this.setFocused(false);
+  };
+
+  private setFocused(focused: boolean): void {
+    if (focused === this.focused) return;
+    this.focused = focused;
+    this.renderer?.setFocused(focused);
+    this.requestFrame();
   }
 
   /** Draws one frame, for a change that needs no follow-up frames (a cursor blink). */

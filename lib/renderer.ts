@@ -135,6 +135,8 @@ export interface FrameOverlay {
   cursorY: number;
   /** Cursor shown: at the bottom of the scrollback, visible, and in the blink's on phase. */
   showCursor: boolean;
+  /** The terminal has focus; an unfocused cursor is drawn as an outline and never blinks, as in xterm.js. */
+  focused: boolean;
   viewportY: number;
   scrollbackLength: number;
   cols: number;
@@ -236,6 +238,8 @@ export abstract class TerminalRenderer {
 
   protected cursorVisible = true;
   private lastCursorVisible = true;
+  protected focused = false;
+  private lastFocused = false;
   private cursorBlinkInterval?: number;
 
   /** Called when the renderer needs another frame (cursor blink), so an idle render loop wakes. */
@@ -282,7 +286,7 @@ export abstract class TerminalRenderer {
     this.minimumContrastRatio = options.minimumContrastRatio ?? 1;
     this.themeBackgroundRgb = cssRgb(this.theme.background);
     this.metrics = this.measure();
-    if (this.cursorBlink) this.startCursorBlink();
+    if (this.cursorBlink && this.focused) this.startCursorBlink();
   }
 
   /** Draws one viewport row. */
@@ -326,8 +330,10 @@ export abstract class TerminalRenderer {
 
     const cursorMoved =
       cursor.x !== this.lastCursorPosition.x || cursor.y !== this.lastCursorPosition.y;
-    const blinked = this.cursorVisible !== this.lastCursorVisible;
+    const blinked =
+      this.cursorVisible !== this.lastCursorVisible || this.focused !== this.lastFocused;
     this.lastCursorVisible = this.cursorVisible;
+    this.lastFocused = this.focused;
     if (this.cursorInRows && (cursorMoved || blinked)) {
       if (!forceAll && !buffer.isRowDirty(cursor.y)) {
         const line = buffer.getLine(cursor.y);
@@ -417,6 +423,7 @@ export abstract class TerminalRenderer {
       cursorX: cursor.x,
       cursorY: cursor.y,
       showCursor: viewportY === 0 && cursor.visible && this.cursorVisible,
+      focused: this.focused,
       viewportY,
       scrollbackLength,
       cols: dims.cols,
@@ -622,13 +629,18 @@ export abstract class TerminalRenderer {
   }
 
   public setCursorBlink(enabled: boolean): void {
-    if (enabled && !this.cursorBlink) {
-      this.cursorBlink = true;
-      this.startCursorBlink();
-    } else if (!enabled && this.cursorBlink) {
-      this.cursorBlink = false;
-      this.stopCursorBlink();
-    }
+    if (enabled === this.cursorBlink) return;
+    this.cursorBlink = enabled;
+    this.stopCursorBlink();
+    if (enabled && this.focused) this.startCursorBlink();
+  }
+
+  /** Blink only while focused; unfocused, the cursor is a steady outline. */
+  public setFocused(focused: boolean): void {
+    if (focused === this.focused) return;
+    this.focused = focused;
+    this.stopCursorBlink();
+    if (focused && this.cursorBlink) this.startCursorBlink();
   }
 
   public getMetrics(): FontMetrics {
@@ -752,7 +764,7 @@ export class CanvasRenderer extends TerminalRenderer {
   }
 
   protected finishFrame(overlay: FrameOverlay): void {
-    if (overlay.showCursor) this.renderCursor(overlay.cursorX, overlay.cursorY);
+    if (overlay.showCursor) this.renderCursor(overlay.cursorX, overlay.cursorY, overlay.focused);
     if (overlay.scrollbarOpacity > 0) this.renderScrollbar(overlay);
   }
 
@@ -980,11 +992,20 @@ export class CanvasRenderer extends TerminalRenderer {
     ctx.stroke();
   }
 
-  private renderCursor(x: number, y: number): void {
+  private renderCursor(x: number, y: number, focused: boolean): void {
     const cursorX = x * this.metrics.width;
     const cursorY = y * this.metrics.height;
     this.setFill(this.theme.cursor);
-    if (this.cursorStyle === 'block') {
+    if (!focused) {
+      this.ctx.strokeStyle = this.theme.cursor;
+      this.ctx.lineWidth = 1;
+      this.ctx.strokeRect(
+        cursorX + 0.5,
+        cursorY + 0.5,
+        this.metrics.width - 1,
+        this.metrics.height - 1
+      );
+    } else if (this.cursorStyle === 'block') {
       this.ctx.fillRect(cursorX, cursorY, this.metrics.width, this.metrics.height);
       const line = this.currentBuffer?.getLine(y);
       if (line?.[x]) {
