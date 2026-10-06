@@ -5,7 +5,7 @@
  * repeated scrolls, and rows that are not fully overwritten.
  */
 
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'vitest';
 import type { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
 import type { GhosttyCell } from './types';

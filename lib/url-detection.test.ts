@@ -5,7 +5,7 @@
  * are correctly detected and made clickable.
  */
 
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'vitest';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import type { ILink } from './types';
 

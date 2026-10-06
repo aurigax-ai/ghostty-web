@@ -1,18 +1,7 @@
 /**
- * Happy DOM Setup for Tests
- *
- * This file is preloaded by Bun before running tests (configured in bunfig.toml).
- * It registers Happy DOM's global objects (window, document, HTMLElement, etc.)
- * so that tests requiring DOM APIs can run successfully.
- *
- * @see bunfig.toml - test.preload configuration
- * @see https://bun.sh/docs/test/dom
+ * Test setup for Vitest (happy-dom environment, see vitest.config.ts).
+ * Happy DOM has no canvas rendering, so the 2D context is mocked here.
  */
-
-import { GlobalRegistrator } from '@happy-dom/global-registrator';
-
-// Register Happy DOM globals (window, document, etc.)
-GlobalRegistrator.register();
 
 // Mock Canvas 2D Context
 // Happy DOM doesn't provide canvas rendering APIs, so we mock them for testing.

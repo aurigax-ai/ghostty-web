@@ -2,7 +2,7 @@
  * Unit tests for InputHandler
  */
 
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { Ghostty } from './ghostty';
 import { InputHandler } from './input-handler';
 import { Key, KeyAction, Mods } from './types';
@@ -60,8 +60,8 @@ function createKeyEvent(
     shiftKey: modifiers.shift ?? false,
     metaKey: modifiers.meta ?? false,
     repeat: false,
-    preventDefault: mock(() => {}),
-    stopPropagation: mock(() => {}),
+    preventDefault: vi.fn(() => {}),
+    stopPropagation: vi.fn(() => {}),
   };
 }
 
@@ -83,8 +83,8 @@ function createClipboardEvent(text: string | null): MockClipboardEvent {
             },
           }
         : null,
-    preventDefault: mock(() => {}),
-    stopPropagation: mock(() => {}),
+    preventDefault: vi.fn(() => {}),
+    stopPropagation: vi.fn(() => {}),
   };
 }
 
@@ -95,8 +95,8 @@ function createBeforeInputEvent(inputType: string, data: string | null): MockInp
     inputType,
     data,
     isComposing: false,
-    preventDefault: mock(() => {}),
-    stopPropagation: mock(() => {}),
+    preventDefault: vi.fn(() => {}),
+    stopPropagation: vi.fn(() => {}),
   };
 }
 interface MockCompositionEvent {
@@ -114,8 +114,8 @@ function createCompositionEvent(
   return {
     type,
     data,
-    preventDefault: mock(() => {}),
-    stopPropagation: mock(() => {}),
+    preventDefault: vi.fn(() => {}),
+    stopPropagation: vi.fn(() => {}),
   };
 }
 // Helper to create mock container

@@ -5,7 +5,7 @@
  * Uses createIsolatedTerminal() to ensure each test gets its own WASM instance.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
 
