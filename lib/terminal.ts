@@ -17,14 +17,15 @@
 
 import { BufferNamespace } from './buffer';
 import { EventEmitter } from './event-emitter';
-import type {
-  DesktopNotificationEvent,
-  Ghostty,
-  GhosttyCell,
-  GhosttyTerminal,
-  GhosttyTerminalConfig,
-  MouseTrackingMode,
-  SemanticPromptEvent,
+import {
+  type DesktopNotificationEvent,
+  DirtyState,
+  type Ghostty,
+  type GhosttyCell,
+  type GhosttyTerminal,
+  type GhosttyTerminalConfig,
+  type MouseTrackingMode,
+  type SemanticPromptEvent,
 } from './ghostty';
 import { getGhostty } from './index';
 import { InputHandler, type MouseTrackingConfig } from './input-handler';
@@ -955,7 +956,7 @@ export class Terminal implements ITerminalCore {
 
     if (newViewportY !== this.viewportY) {
       this.viewportY = newViewportY;
-      this.scrollEmitter.fire(this.viewportY);
+      this.fireScroll();
 
       // Show scrollbar when scrolling (with auto-hide)
       if (scrollbackLength > 0) {
@@ -980,7 +981,7 @@ export class Terminal implements ITerminalCore {
     const scrollbackLength = this.getScrollbackLength();
     if (scrollbackLength > 0 && this.viewportY !== scrollbackLength) {
       this.viewportY = scrollbackLength;
-      this.scrollEmitter.fire(this.viewportY);
+      this.fireScroll();
       this.showScrollbar();
     }
   }
@@ -992,7 +993,7 @@ export class Terminal implements ITerminalCore {
     this.wake();
     if (this.viewportY !== 0) {
       this.viewportY = 0;
-      this.scrollEmitter.fire(this.viewportY);
+      this.fireScroll();
       // Show scrollbar briefly when scrolling to bottom
       if (this.getScrollbackLength() > 0) {
         this.showScrollbar();
@@ -1004,14 +1005,16 @@ export class Terminal implements ITerminalCore {
    * Scroll viewport to a specific line in the buffer
    * @param line Line number (0 = top of scrollback, scrollbackLength = bottom)
    */
+  /** Scrolls so that absolute buffer line `line` (0 = oldest scrollback line) is at the top, like xterm.js. */
   public scrollToLine(line: number): void {
     this.wake();
     const scrollbackLength = this.getScrollbackLength();
-    const newViewportY = Math.max(0, Math.min(scrollbackLength, line));
+    const top = Math.max(0, Math.min(scrollbackLength, Math.round(line)));
+    const newViewportY = scrollbackLength - top;
 
     if (newViewportY !== this.viewportY) {
       this.viewportY = newViewportY;
-      this.scrollEmitter.fire(this.viewportY);
+      this.fireScroll();
 
       // Show scrollbar when scrolling to specific line
       if (scrollbackLength > 0) {
@@ -1038,7 +1041,7 @@ export class Terminal implements ITerminalCore {
     if (duration === 0) {
       this.viewportY = newTarget;
       this.targetViewportY = newTarget;
-      this.scrollEmitter.fire(Math.floor(this.viewportY));
+      this.fireScroll();
 
       if (scrollbackLength > 0) {
         this.showScrollbar();
@@ -1081,7 +1084,7 @@ export class Terminal implements ITerminalCore {
     // If very close, snap to target
     if (absDistance < 0.01) {
       this.viewportY = this.targetViewportY;
-      this.scrollEmitter.fire(Math.floor(this.viewportY));
+      this.fireScroll();
 
       const scrollbackLength = this.getScrollbackLength();
       if (scrollbackLength > 0) {
@@ -1104,7 +1107,7 @@ export class Terminal implements ITerminalCore {
 
     // Fire scroll event (use floor to convert fractional to integer for API)
     const intViewportY = Math.floor(this.viewportY);
-    this.scrollEmitter.fire(intViewportY);
+    this.fireScroll();
 
     // Show scrollbar during animation
     const scrollbackLength = this.getScrollbackLength();
@@ -1201,7 +1204,9 @@ export class Terminal implements ITerminalCore {
     const loop = () => {
       this.animationFrameId = undefined;
       if (this.isDisposed || !this.isOpen) return;
+      const drew = this.wasmTerm!.update() !== DirtyState.NONE;
       this.renderer!.render(this.wasmTerm!, false, this.viewportY, this, this.scrollbarOpacity);
+      if (drew) this.renderEmitter.fire({ start: 0, end: this.rows - 1 });
       const cursor = this.wasmTerm!.getCursor();
       if (cursor.y !== this.lastCursorY) {
         this.lastCursorY = cursor.y;
@@ -1963,6 +1968,11 @@ export class Terminal implements ITerminalCore {
     }
     for (const marker of [...this.markers]) marker.refresh();
     this.wake();
+  }
+
+  /** Fires onScroll with the absolute line at the top of the viewport, as xterm.js does. */
+  private fireScroll(): void {
+    this.scrollEmitter.fire(this.buffer.active.viewportY);
   }
 
   private disposeMarkers(): void {

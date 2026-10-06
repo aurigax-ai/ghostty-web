@@ -117,4 +117,26 @@ describe('host hooks', () => {
     t.write('\x1b[?1049l');
     expect(switches).toEqual(['alternate', 'normal']);
   });
+
+  test('fires onRender after a frame that drew new output', async () => {
+    const t = await openTerminal();
+    await new Promise((r) => requestAnimationFrame(r));
+    let renders = 0;
+    t.onRender(() => renders++);
+    t.write('hello');
+    await new Promise((r) => requestAnimationFrame(r));
+    await new Promise((r) => requestAnimationFrame(r));
+    expect(renders).toBeGreaterThan(0);
+  });
+
+  test('scrolls to an absolute line and reports it, like xterm.js', async () => {
+    const t = await openTerminal(20, 5);
+    for (let i = 0; i < 30; i++) t.write(`line ${i}\r\n`);
+    const tops: number[] = [];
+    t.onScroll((top) => tops.push(top));
+    t.scrollToLine(3);
+    expect(t.buffer.active.viewportY).toBe(3);
+    expect(tops).toEqual([3]);
+    expect(t.buffer.active.getLine(3)?.translateToString(true)).toBe('line 3');
+  });
 });

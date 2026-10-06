@@ -458,10 +458,11 @@ describe('Scrolling Methods', () => {
       term.write(`Line ${i}\r\n`);
     }
 
-    // Scroll to line 15
+    // Put absolute line 15 at the top of the viewport (xterm.js semantics)
     term.scrollToLine(15);
 
-    expect((term as any).viewportY).toBe(15);
+    expect(term.buffer.active.viewportY).toBe(15);
+    expect((term as any).viewportY).toBe(term.buffer.active.baseY - 15);
   });
 
   test('scrollToLine() should clamp to valid range', async () => {
@@ -487,8 +488,8 @@ describe('Scrolling Methods', () => {
     // Try negative line
     term.scrollToLine(-5);
 
-    // Should be clamped to 0 (bottom)
-    expect((term as any).viewportY).toBe(0);
+    // Should be clamped to line 0, the top of the scrollback
+    expect(term.buffer.active.viewportY).toBe(0);
   });
 });
 
@@ -528,7 +529,7 @@ describe('Scroll Events', () => {
     term.scrollLines(-5);
 
     expect(fireCount).toBe(1);
-    expect(scrollPosition).toBe(5);
+    expect(scrollPosition).toBe(term.buffer.active.baseY - 5);
   });
 
   test('onScroll should not fire if position unchanged', async () => {
@@ -562,9 +563,8 @@ describe('Scroll Events', () => {
     term.scrollLines(2);
 
     expect(positions.length).toBe(3);
-    expect(positions[0]).toBe(5);
-    expect(positions[1]).toBe(8);
-    expect(positions[2]).toBe(6);
+    const base = term.buffer.active.baseY;
+    expect(positions).toEqual([base - 5, base - 8, base - 6]);
   });
 
   // Note: onRender event implementation uses dirty tracking for performance
