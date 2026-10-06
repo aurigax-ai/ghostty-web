@@ -17,7 +17,15 @@
 
 import { BufferNamespace } from './buffer';
 import { EventEmitter } from './event-emitter';
-import type { Ghostty, GhosttyCell, GhosttyTerminal, GhosttyTerminalConfig } from './ghostty';
+import type {
+  DesktopNotificationEvent,
+  Ghostty,
+  GhosttyCell,
+  GhosttyTerminal,
+  GhosttyTerminalConfig,
+  MouseTrackingMode,
+  SemanticPromptEvent,
+} from './ghostty';
 import { getGhostty } from './index';
 import { InputHandler, type MouseTrackingConfig } from './input-handler';
 import type {
@@ -32,6 +40,7 @@ import type {
   IUnicodeVersionProvider,
 } from './interfaces';
 import { LinkDetector } from './link-detector';
+import { type IMarker, Marker } from './marker';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import { CanvasRenderer } from './renderer';
@@ -96,6 +105,28 @@ export class Terminal implements ITerminalCore {
   public readonly onScroll: IEvent<number> = this.scrollEmitter.event;
   public readonly onRender: IEvent<{ start: number; end: number }> = this.renderEmitter.event;
   public readonly onCursorMove: IEvent<void> = this.cursorMoveEmitter.event;
+
+  private pwdEmitter = new EventEmitter<string>();
+  private semanticPromptEmitter = new EventEmitter<SemanticPromptEvent>();
+  private desktopNotificationEmitter = new EventEmitter<DesktopNotificationEvent>();
+  private unknownOscEmitter = new EventEmitter<string>();
+
+  /** OSC 7 working directory as the shell sent it (raw file:// URI with its host). */
+  public readonly onPwdChange: IEvent<string> = this.pwdEmitter.event;
+  /** OSC 133 prompt marks; buffer.active cursor reads inside the handler are exact. */
+  public readonly onSemanticPrompt: IEvent<SemanticPromptEvent> = this.semanticPromptEmitter.event;
+  /** OSC 9 / OSC 777 desktop notifications. */
+  public readonly onDesktopNotification: IEvent<DesktopNotificationEvent> =
+    this.desktopNotificationEmitter.event;
+  /** OSCs libghostty-vt does not implement, as their content (e.g. `633;E;ls`). */
+  public readonly onUnknownOsc: IEvent<string> = this.unknownOscEmitter.event;
+
+  private engineSubscriptions: IDisposable[] = [];
+  private clipboardHandler: ((text: string) => boolean) | null = null;
+  private markers = new Set<Marker>();
+  private lastAlternate = false;
+  private idleFrames = 0;
+  private static readonly IDLE_FRAMES_BEFORE_SLEEP = 30;
 
   // Lifecycle state
   private isOpen = false;
@@ -185,6 +216,7 @@ export class Terminal implements ITerminalCore {
    * This enables xterm.js compatibility where options can be changed at runtime
    */
   private handleOptionChange(key: string, newValue: any, oldValue: any): void {
+    this.wake();
     if (newValue === oldValue) return;
 
     switch (key) {
@@ -373,6 +405,7 @@ export class Terminal implements ITerminalCore {
       // Create WASM terminal with current dimensions and config
       const config = this.buildWasmConfig();
       this.wasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
+      this.wireEngine();
 
       // Create canvas element
       this.canvas = document.createElement('canvas');
@@ -425,6 +458,7 @@ export class Terminal implements ITerminalCore {
         cursorBlink: this.options.cursorBlink,
         theme: this.options.theme,
       });
+      this.renderer.onNeedsFrame = () => this.wake();
 
       // Size canvas to terminal dimensions (use renderer.resize for proper DPI scaling)
       this.renderer.resize(this.cols, this.rows);
@@ -566,14 +600,6 @@ export class Terminal implements ITerminalCore {
     // These need to be sent back to the PTY via onData
     this.processTerminalResponses();
 
-    // Check for bell character (BEL, \x07)
-    // WASM doesn't expose bell events, so we detect it in the data stream
-    if (typeof data === 'string' && data.includes('\x07')) {
-      this.bellEmitter.fire();
-    } else if (data instanceof Uint8Array && data.includes(0x07)) {
-      this.bellEmitter.fire();
-    }
-
     // Invalidate link cache (content changed)
     this.linkDetector?.invalidateCache();
 
@@ -582,11 +608,7 @@ export class Terminal implements ITerminalCore {
       this.scrollToBottom();
     }
 
-    // Check for title changes (OSC 0, 1, 2 sequences)
-    // This is a simplified implementation - Ghostty WASM may provide this
-    if (typeof data === 'string' && data.includes('\x1b]')) {
-      this.checkForTitleChange(data);
-    }
+    this.afterWrite();
 
     // Call callback if provided
     if (callback) {
@@ -712,7 +734,7 @@ export class Terminal implements ITerminalCore {
 
     // Flush any writes that were queued during resize, then restart render loop
     this.flushWriteQueue();
-    this.startRenderLoop();
+    this.wake();
   }
 
   /**
@@ -735,7 +757,10 @@ export class Terminal implements ITerminalCore {
       this.wasmTerm.free();
     }
     const config = this.buildWasmConfig();
+    this.disposeMarkers();
     this.wasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
+    this.wireEngine();
+    this.wake();
 
     // Clear renderer
     this.renderer!.clear();
@@ -748,6 +773,7 @@ export class Terminal implements ITerminalCore {
    * Focus terminal input
    */
   focus(): void {
+    this.wake();
     if (this.isOpen && this.element) {
       // Focus immediately for immediate keyboard/wheel event handling
       this.element.focus();
@@ -764,6 +790,7 @@ export class Terminal implements ITerminalCore {
    * Blur terminal (remove focus)
    */
   blur(): void {
+    this.wake();
     if (this.isOpen && this.element) {
       this.element.blur();
     }
@@ -910,6 +937,7 @@ export class Terminal implements ITerminalCore {
    * @param amount Number of lines to scroll (positive = down, negative = up)
    */
   public scrollLines(amount: number): void {
+    this.wake();
     if (!this.wasmTerm) {
       throw new Error('Terminal not open');
     }
@@ -948,6 +976,7 @@ export class Terminal implements ITerminalCore {
    * Scroll viewport to the top of the scrollback buffer
    */
   public scrollToTop(): void {
+    this.wake();
     const scrollbackLength = this.getScrollbackLength();
     if (scrollbackLength > 0 && this.viewportY !== scrollbackLength) {
       this.viewportY = scrollbackLength;
@@ -960,6 +989,7 @@ export class Terminal implements ITerminalCore {
    * Scroll viewport to the bottom (current output)
    */
   public scrollToBottom(): void {
+    this.wake();
     if (this.viewportY !== 0) {
       this.viewportY = 0;
       this.scrollEmitter.fire(this.viewportY);
@@ -975,6 +1005,7 @@ export class Terminal implements ITerminalCore {
    * @param line Line number (0 = top of scrollback, scrollbackLength = bottom)
    */
   public scrollToLine(line: number): void {
+    this.wake();
     const scrollbackLength = this.getScrollbackLength();
     const newViewportY = Math.max(0, Math.min(scrollbackLength, line));
 
@@ -1036,6 +1067,7 @@ export class Terminal implements ITerminalCore {
    * Uses asymptotic approach - moves a fraction of remaining distance each frame
    */
   private animateScroll = (): void => {
+    this.wake();
     if (!this.wasmTerm || this.scrollAnimationStartTime === undefined) {
       return;
     }
@@ -1165,32 +1197,21 @@ export class Terminal implements ITerminalCore {
    * Start the render loop
    */
   private startRenderLoop(): void {
-    if (this.animationFrameId) return; // already running
+    if (this.animationFrameId) return;
     const loop = () => {
-      if (!this.isDisposed && this.isOpen) {
-        // Render using WASM's native dirty tracking
-        // The render() method:
-        // 1. Calls update() once to sync state and check dirty flags
-        // 2. Only redraws dirty rows when forceAll=false
-        // 3. Always calls clearDirty() at the end
-        this.renderer!.render(this.wasmTerm!, false, this.viewportY, this, this.scrollbarOpacity);
-
-        // Check for cursor movement (Phase 2: onCursorMove event)
-        // Note: getCursor() reads from already-updated render state (from render() above)
-        const cursor = this.wasmTerm!.getCursor();
-        if (cursor.y !== this.lastCursorY) {
-          this.lastCursorY = cursor.y;
-          this.cursorMoveEmitter.fire();
-        }
-
-        // Note: onRender event is intentionally not fired in the render loop
-        // to avoid performance issues. For now, consumers can use requestAnimationFrame
-        // if they need frame-by-frame updates.
-
+      this.animationFrameId = undefined;
+      if (this.isDisposed || !this.isOpen) return;
+      this.renderer!.render(this.wasmTerm!, false, this.viewportY, this, this.scrollbarOpacity);
+      const cursor = this.wasmTerm!.getCursor();
+      if (cursor.y !== this.lastCursorY) {
+        this.lastCursorY = cursor.y;
+        this.cursorMoveEmitter.fire();
+      }
+      if (this.idleFrames++ < Terminal.IDLE_FRAMES_BEFORE_SLEEP) {
         this.animationFrameId = requestAnimationFrame(loop);
       }
     };
-    loop();
+    this.animationFrameId = requestAnimationFrame(loop);
   }
 
   /**
@@ -1306,6 +1327,7 @@ export class Terminal implements ITerminalCore {
    * Throttled to avoid blocking scroll events (except when dragging scrollbar)
    */
   private handleMouseMove = (e: MouseEvent): void => {
+    this.wake();
     if (!this.canvas || !this.renderer || !this.wasmTerm) return;
 
     // If dragging scrollbar, handle immediately without throttling
@@ -1475,6 +1497,7 @@ export class Terminal implements ITerminalCore {
    * Handle mouse leave to clear link hover
    */
   private handleMouseLeave = (): void => {
+    this.wake();
     // Clear hyperlink underline
     if (this.renderer && this.wasmTerm) {
       const previousHyperlinkId = (this.renderer as any).hoveredHyperlinkId || 0;
@@ -1508,6 +1531,7 @@ export class Terminal implements ITerminalCore {
    * Handle mouse click for link activation
    */
   private handleClick = async (e: MouseEvent): Promise<void> => {
+    this.wake();
     // For more reliable clicking, detect the link at click time
     // rather than relying on cached hover state (avoids async races)
     if (!this.canvas || !this.renderer || !this.linkDetector || !this.wasmTerm) return;
@@ -1555,6 +1579,7 @@ export class Terminal implements ITerminalCore {
    * Handle wheel events for scrolling (Phase 2)
    */
   private handleWheel = (e: WheelEvent): void => {
+    this.wake();
     // Always prevent default browser scrolling
     e.preventDefault();
     e.stopPropagation();
@@ -1617,6 +1642,7 @@ export class Terminal implements ITerminalCore {
    * Handle mouse down for scrollbar interaction
    */
   private handleMouseDown = (e: MouseEvent): void => {
+    this.wake();
     if (!this.canvas || !this.renderer || !this.wasmTerm) return;
 
     const scrollbackLength = this.wasmTerm.getScrollbackLength();
@@ -1675,6 +1701,7 @@ export class Terminal implements ITerminalCore {
    * Handle mouse up for scrollbar drag
    */
   private handleMouseUp = (): void => {
+    this.wake();
     if (this.isDraggingScrollbar) {
       this.isDraggingScrollbar = false;
       this.scrollbarDragStart = null;
@@ -1730,6 +1757,7 @@ export class Terminal implements ITerminalCore {
    * Show scrollbar with fade-in and schedule auto-hide
    */
   private showScrollbar(): void {
+    this.wake();
     // Clear any existing hide timeout
     if (this.scrollbarHideTimeout) {
       window.clearTimeout(this.scrollbarHideTimeout);
@@ -1758,6 +1786,7 @@ export class Terminal implements ITerminalCore {
    * Hide scrollbar with fade-out
    */
   private hideScrollbar(): void {
+    this.wake();
     if (this.scrollbarHideTimeout) {
       window.clearTimeout(this.scrollbarHideTimeout);
       this.scrollbarHideTimeout = undefined;
@@ -1772,6 +1801,7 @@ export class Terminal implements ITerminalCore {
    * Fade in scrollbar
    */
   private fadeInScrollbar(): void {
+    this.wake();
     const startTime = Date.now();
     const animate = () => {
       const elapsed = Date.now() - startTime;
@@ -1794,6 +1824,7 @@ export class Terminal implements ITerminalCore {
    * Fade out scrollbar
    */
   private fadeOutScrollbar(): void {
+    this.wake();
     const startTime = Date.now();
     const startOpacity = this.scrollbarOpacity;
     const animate = () => {
@@ -1849,29 +1880,94 @@ export class Terminal implements ITerminalCore {
     }
   }
 
+  // ============================================================================
+  // Host hooks: markers, clipboard, modes
+  // ============================================================================
+
   /**
-   * Check for title changes in written data (OSC sequences)
-   * Simplified implementation - looks for OSC 0, 1, 2
+   * Adds a marker on the cursor's line plus `cursorYOffset`, like xterm.js.
+   * Returns undefined when that line is outside the active area.
    */
-  private checkForTitleChange(data: string): void {
-    // OSC sequences: ESC ] Ps ; Pt BEL or ESC ] Ps ; Pt ST
-    // OSC 0 = icon + title, OSC 1 = icon, OSC 2 = title
-    const oscRegex = /\x1b\]([012]);([^\x07\x1b]*?)(?:\x07|\x1b\\)/g;
-    let match: RegExpExecArray | null = null;
+  public registerMarker(cursorYOffset: number = 0): IMarker | undefined {
+    if (!this.wasmTerm) return undefined;
+    const y = this.wasmTerm.cursorPosition().y + cursorYOffset;
+    if (y < 0 || y >= this.rows) return undefined;
+    const row = this.wasmTerm.trackRow(y);
+    if (!row) return undefined;
+    const marker = new Marker(row);
+    this.markers.add(marker);
+    marker.onDispose(() => this.markers.delete(marker));
+    return marker;
+  }
 
-    // biome-ignore lint/suspicious/noAssignInExpressions: Standard regex pattern
-    while ((match = oscRegex.exec(data)) !== null) {
-      const ps = match[1];
-      const pt = match[2];
+  /**
+   * Decides OSC 52 clipboard writes synchronously (true allows the write).
+   * Unset, every write is denied; clipboard reads are never answered.
+   */
+  public set clipboardWriteHandler(handler: ((text: string) => boolean) | null) {
+    this.clipboardHandler = handler;
+    if (this.wasmTerm) this.wasmTerm.clipboardWriteHandler = handler;
+  }
 
-      // OSC 0 and OSC 2 set the title
-      if (ps === '0' || ps === '2') {
-        if (pt !== this.currentTitle) {
-          this.currentTitle = pt;
-          this.titleChangeEmitter.fire(pt);
-        }
-      }
+  public get clipboardWriteHandler(): ((text: string) => boolean) | null {
+    return this.clipboardHandler;
+  }
+
+  /** xterm.js-compatible terminal modes. */
+  public get modes(): {
+    mouseTrackingMode: MouseTrackingMode;
+    bracketedPasteMode: boolean;
+    applicationCursorKeysMode: boolean;
+    sendFocusMode: boolean;
+  } {
+    return {
+      mouseTrackingMode: this.wasmTerm?.mouseTrackingMode() ?? 'none',
+      bracketedPasteMode: this.wasmTerm?.hasBracketedPaste() ?? false,
+      applicationCursorKeysMode: this.wasmTerm?.getMode(1, false) ?? false,
+      sendFocusMode: this.wasmTerm?.hasFocusEvents() ?? false,
+    };
+  }
+
+  /** Keeps the render loop running for a while; called whenever something may need drawing. */
+  public wake(): void {
+    this.idleFrames = 0;
+    if (this.isOpen && !this.isDisposed) this.startRenderLoop();
+  }
+
+  private wireEngine(): void {
+    for (const sub of this.engineSubscriptions) sub.dispose();
+    const engine = this.wasmTerm!;
+    engine.clipboardWriteHandler = this.clipboardHandler;
+    this.lastAlternate = engine.isAlternateScreen();
+    this.engineSubscriptions = [
+      engine.onBell(() => this.bellEmitter.fire()),
+      engine.onTitleChange((title) => {
+        if (title === this.currentTitle) return;
+        this.currentTitle = title;
+        this.titleChangeEmitter.fire(title);
+      }),
+      engine.onPwdChange((pwd) => this.pwdEmitter.fire(pwd)),
+      engine.onSemanticPrompt((event) => this.semanticPromptEmitter.fire(event)),
+      engine.onDesktopNotification((n) => this.desktopNotificationEmitter.fire(n)),
+      engine.onUnknownOsc((content) => this.unknownOscEmitter.fire(content)),
+    ];
+  }
+
+  private afterWrite(): void {
+    const engine = this.wasmTerm;
+    if (!engine) return;
+    const alternate = engine.isAlternateScreen();
+    if (alternate !== this.lastAlternate) {
+      this.lastAlternate = alternate;
+      (this.buffer as BufferNamespace)._fireBufferChange(this.buffer.active);
     }
+    for (const marker of [...this.markers]) marker.refresh();
+    this.wake();
+  }
+
+  private disposeMarkers(): void {
+    for (const marker of [...this.markers]) marker.dispose();
+    this.markers.clear();
   }
 
   // ============================================================================

@@ -7,6 +7,8 @@
  */
 
 import { Abi, GHOSTTY_SUCCESS, type VtExports } from './abi';
+import { EventEmitter } from './event-emitter';
+import type { IEvent } from './interfaces';
 import {
   CellFlags,
   type Cursor,
@@ -187,6 +189,37 @@ export class KeyEncoder {
   }
 }
 
+export type SemanticPromptKind = 'prompt-start' | 'input-start' | 'output-start' | 'command-end';
+
+export interface SemanticPromptEvent {
+  kind: SemanticPromptKind;
+  exitCode?: number;
+  command: string;
+}
+
+export interface DesktopNotificationEvent {
+  title: string;
+  body: string;
+}
+
+const PROMPT_KINDS: Record<string, SemanticPromptKind> = {
+  PROMPT_START: 'prompt-start',
+  INPUT_START: 'input-start',
+  OUTPUT_START: 'output-start',
+  COMMAND_END: 'command-end',
+};
+
+const UNKNOWN_SEQUENCE_MAX_BYTES = 4096;
+
+export type MouseTrackingMode = 'none' | 'x10' | 'vt200' | 'drag' | 'any';
+
+/** A row the terminal keeps track of as output scrolls, reflows or is pruned. */
+export interface TrackedRow {
+  /** The row's line in the screen (scrollback first), or null once it no longer exists. */
+  line(): number | null;
+  free(): void;
+}
+
 const POINT_ACTIVE = 'ACTIVE';
 const POINT_HISTORY = 'HISTORY';
 type PointSpace = typeof POINT_ACTIVE | typeof POINT_HISTORY;
@@ -232,6 +265,31 @@ export class GhosttyTerminal {
   private responses: string[] = [];
   private callbacks: number[] = [];
 
+  private readonly bellEmitter = new EventEmitter<void>();
+  private readonly titleEmitter = new EventEmitter<string>();
+  private readonly pwdEmitter = new EventEmitter<string>();
+  private readonly promptEmitter = new EventEmitter<SemanticPromptEvent>();
+  private readonly notificationEmitter = new EventEmitter<DesktopNotificationEvent>();
+  private readonly unknownOscEmitter = new EventEmitter<string>();
+
+  /** BEL from the program (Ghostty's own bell, not a guess from the byte stream). */
+  readonly onBell: IEvent<void> = this.bellEmitter.event;
+  /** OSC 0/2 title, read from the terminal after Ghostty applied it. */
+  readonly onTitleChange: IEvent<string> = this.titleEmitter.event;
+  /** OSC 7 (or OSC 9 / 1337 CurrentDir) as the shell sent it: for OSC 7 the raw file:// URI with its host. */
+  readonly onPwdChange: IEvent<string> = this.pwdEmitter.event;
+  /** OSC 133 prompt marks, delivered at their exact position in the stream. */
+  readonly onSemanticPrompt: IEvent<SemanticPromptEvent> = this.promptEmitter.event;
+  /** OSC 9 / OSC 777 desktop notifications. */
+  readonly onDesktopNotification: IEvent<DesktopNotificationEvent> = this.notificationEmitter.event;
+  /** The content of an OSC libghostty-vt does not implement, e.g. `633;E;...`. */
+  readonly onUnknownOsc: IEvent<string> = this.unknownOscEmitter.event;
+  /**
+   * Decides an OSC 52 clipboard write synchronously: return true to allow it.
+   * Without a handler every write is denied. Clipboard reads are never answered.
+   */
+  clipboardWriteHandler: ((text: string) => boolean) | null = null;
+
   constructor(
     private readonly abi: Abi,
     cols: number = 80,
@@ -257,6 +315,7 @@ export class GhosttyTerminal {
     });
     this.callbacks.push(writePty);
     this.setOption('WRITE_PTY', writePty);
+    this.installHooks();
     this.setModeDefault(GRAPHEME_CLUSTER_MODE, true);
     if (config) this.applyConfig(config);
     this.initCellPool();
@@ -310,6 +369,16 @@ export class GhosttyTerminal {
     abi.call('ghostty_terminal_free', this.handle);
     for (const index of this.callbacks) abi.removeCallback(index);
     this.callbacks = [];
+    for (const emitter of [
+      this.bellEmitter,
+      this.titleEmitter,
+      this.pwdEmitter,
+      this.promptEmitter,
+      this.notificationEmitter,
+      this.unknownOscEmitter,
+    ]) {
+      emitter.dispose();
+    }
     this.handle = 0;
   }
 
@@ -439,11 +508,57 @@ export class GhosttyTerminal {
     return this.getMode(1004, false);
   }
 
+  mouseTrackingMode(): MouseTrackingMode {
+    if (this.getMode(1003)) return 'any';
+    if (this.getMode(1002)) return 'drag';
+    if (this.getMode(1000)) return 'vt200';
+    if (this.getMode(9)) return 'x10';
+    return 'none';
+  }
+
+  /** Tracks the start of a row of the active area. */
+  trackRow(activeY: number): TrackedRow | null {
+    const abi = this.abi;
+    const ref = abi.with(abi.sizeOf('GhosttyPoint'), (point) => {
+      const view = abi.view();
+      view.setInt32(point, abi.enumValue('GhosttyPointTag', POINT_ACTIVE), true);
+      const coord = point + abi.offset('GhosttyPoint', 'value');
+      view.setUint16(coord + abi.offset('GhosttyPointCoordinate', 'x'), 0, true);
+      view.setUint32(coord + abi.offset('GhosttyPointCoordinate', 'y'), activeY, true);
+      const slot = abi.call('ghostty_wasm_alloc_opaque');
+      try {
+        const result = abi.call('ghostty_terminal_grid_ref_track', this.handle, point, slot);
+        return result === GHOSTTY_SUCCESS ? abi.call('ghostty_wasm_take_opaque', slot) : 0;
+      } finally {
+        abi.call('ghostty_wasm_free_opaque', slot);
+      }
+    });
+    if (!ref) return null;
+    let freed = false;
+    return {
+      line: () => {
+        if (freed) return null;
+        return abi.with(abi.sizeOf('GhosttyPointCoordinate'), (out) => {
+          const result = abi.call(
+            'ghostty_tracked_grid_ref_point',
+            ref,
+            abi.enumValue('GhosttyPointTag', 'SCREEN'),
+            out
+          );
+          if (result !== GHOSTTY_SUCCESS) return null;
+          return abi.view().getUint32(out + abi.offset('GhosttyPointCoordinate', 'y'), true);
+        });
+      },
+      free: () => {
+        if (freed) return;
+        freed = true;
+        abi.call('ghostty_tracked_grid_ref_free', ref);
+      },
+    };
+  }
+
   hasMouseTracking(): boolean {
-    return (
-      this.readTerminalU32('MOUSE_TRACKING') !==
-      this.abi.enumValue('GhosttyMouseTrackingMode', 'NONE')
-    );
+    return this.readTerminalU32('MOUSE_TRACKING') !== 0;
   }
 
   getMode(mode: number, isAnsi: boolean = false): boolean {
@@ -603,6 +718,108 @@ export class GhosttyTerminal {
         this.setOption('COLOR_PALETTE', ptr);
       });
     }
+  }
+
+  private installHooks(): void {
+    const abi = this.abi;
+    const hook = (option: string, params: number, fn: (...args: number[]) => void) => {
+      const index = abi.addCallback(Array(params).fill('i32'), null, fn);
+      this.callbacks.push(index);
+      this.setOption(option, index);
+    };
+    hook('BELL', 2, () => this.bellEmitter.fire());
+    hook('TITLE_CHANGED', 2, () => this.titleEmitter.fire(this.readTerminalString('TITLE')));
+    hook('PWD_CHANGED', 2, () => this.pwdEmitter.fire(this.readTerminalString('PWD')));
+    hook('SEMANTIC_PROMPT', 3, (_t, _u, event) => {
+      const type = 'GhosttyTerminalSemanticPrompt';
+      const view = abi.view();
+      const kindValue = view.getInt32(event + abi.offset(type, 'kind'), true);
+      const kindName = Object.keys(PROMPT_KINDS).find(
+        (k) => abi.enumValue('GhosttySemanticPromptKind', k) === kindValue
+      );
+      if (!kindName) return;
+      const hasExit = view.getUint8(event + abi.offset(type, 'has_exit_code')) !== 0;
+      const command = event + abi.offset(type, 'command');
+      this.promptEmitter.fire({
+        kind: PROMPT_KINDS[kindName],
+        exitCode: hasExit ? view.getInt32(event + abi.offset(type, 'exit_code'), true) : undefined,
+        command: this.stringAt(command),
+      });
+    });
+    hook('DESKTOP_NOTIFICATION', 3, (_t, _u, n) => {
+      const type = 'GhosttyTerminalDesktopNotification';
+      this.notificationEmitter.fire({
+        title: this.stringAt(n + abi.offset(type, 'title')),
+        body: this.stringAt(n + abi.offset(type, 'body')),
+      });
+    });
+    hook('UNKNOWN_SEQUENCE', 3, (_t, _u, seq) => {
+      const view = abi.view();
+      const type = 'GhosttyTerminalUnknownSequence';
+      const tag = view.getInt32(seq + abi.offset(type, 'tag'), true);
+      if (tag !== abi.enumValue('GhosttyTerminalUnknownSequenceTag', 'OSC')) return;
+      const osc = seq + abi.offset(type, 'value');
+      const oscType = 'GhosttyTerminalUnknownOscSequence';
+      if (view.getUint8(osc + abi.offset(oscType, 'truncated')) !== 0) return;
+      this.unknownOscEmitter.fire(this.stringAt(osc + abi.offset(oscType, 'content')));
+    });
+    abi.with(4, (ptr) => {
+      abi.view().setUint32(ptr, UNKNOWN_SEQUENCE_MAX_BYTES, true);
+      this.setOption('UNKNOWN_MAX_BYTES', ptr);
+    });
+    hook('CLIPBOARD_WRITE', 3, (_t, _u, write) => this.answerClipboardWrite(write));
+  }
+
+  private answerClipboardWrite(write: number): void {
+    const abi = this.abi;
+    const type = 'GhosttyClipboardWrite';
+    const view = abi.view();
+    const contents = view.getUint32(write + abi.offset(type, 'contents'), true);
+    const count = view.getUint32(write + abi.offset(type, 'contents_len'), true);
+    const entry = abi.sizeOf('GhosttyClipboardContent');
+    let text: string | null = null;
+    for (let i = 0; i < count; i++) {
+      const at = contents + i * entry;
+      const mime = this.stringAt(at + abi.offset('GhosttyClipboardContent', 'mime'));
+      if (text === null || mime.startsWith('text/plain')) {
+        text = this.stringAt(at + abi.offset('GhosttyClipboardContent', 'data'));
+      }
+    }
+    const allowed = text !== null && this.clipboardWriteHandler?.(text) === true;
+    const results = 'GhosttyClipboardWriteResult';
+    const reply = abi.exports.__indirect_function_table.get(
+      view.getUint32(write + abi.offset(type, 'reply'), true)
+    ) as ((write: number, reply: number) => void) | null;
+    abi.withSized('GhosttyClipboardWriteReply', (ptr) => {
+      abi
+        .view()
+        .setInt32(
+          ptr + abi.offset('GhosttyClipboardWriteReply', 'result'),
+          abi.enumValue(results, allowed ? 'SUCCESS' : 'DENIED'),
+          true
+        );
+      reply?.(write, ptr);
+    });
+  }
+
+  private stringAt(ptr: number): string {
+    const view = this.abi.view();
+    const data = view.getUint32(ptr + this.abi.offset('GhosttyString', 'ptr'), true);
+    const len = view.getUint32(ptr + this.abi.offset('GhosttyString', 'len'), true);
+    return this.abi.string(data, len);
+  }
+
+  private readTerminalString(data: string): string {
+    const abi = this.abi;
+    return abi.with(abi.sizeOf('GhosttyString'), (out) => {
+      const result = abi.call(
+        'ghostty_terminal_get',
+        this.handle,
+        abi.enumValue('GhosttyTerminalData', data),
+        out
+      );
+      return result === GHOSTTY_SUCCESS ? this.stringAt(out) : '';
+    });
   }
 
   private setModeDefault(mode: number, value: boolean, isAnsi: boolean = false): void {

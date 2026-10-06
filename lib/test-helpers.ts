@@ -32,6 +32,6 @@ import { Terminal } from './terminal';
 export async function createIsolatedTerminal(
   options: Omit<ITerminalOptions, 'ghostty'> = {}
 ): Promise<Terminal> {
-  const ghostty = await Ghostty.load();
+  const ghostty = await Ghostty.load(`${process.cwd()}/ghostty-vt.wasm`);
   return new Terminal({ ...options, ghostty });
 }

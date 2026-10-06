@@ -183,7 +183,7 @@ describe('InputHandler', () => {
 
   beforeEach(async () => {
     // Create a fresh Ghostty WASM instance for complete test isolation
-    ghostty = await Ghostty.load();
+    ghostty = await Ghostty.load(`${process.cwd()}/ghostty-vt.wasm`);
 
     // Create mock container for each test
     container = createMockContainer();

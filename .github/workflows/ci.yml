@@ -21,6 +21,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build:wasm
+      - name: Committed WASM matches the pinned Ghostty
+        run: git diff --exit-code ghostty-vt.wasm
       - run: pnpm fmt
       - run: pnpm lint
       - run: pnpm typecheck

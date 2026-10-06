@@ -106,6 +106,9 @@ export class CanvasRenderer {
   // Cursor blinking state
   private cursorVisible: boolean = true;
   private cursorBlinkInterval?: number;
+
+  /** Called when the renderer needs another frame (cursor blink), so an idle render loop wakes. */
+  public onNeedsFrame?: () => void;
   private lastCursorPosition: { x: number; y: number } = { x: 0, y: 0 };
 
   // Viewport tracking (for scrolling)
@@ -767,7 +770,7 @@ export class CanvasRenderer {
     // xterm.js uses ~530ms blink interval
     this.cursorBlinkInterval = window.setInterval(() => {
       this.cursorVisible = !this.cursorVisible;
-      // Note: Render loop should redraw cursor line automatically
+      this.onNeedsFrame?.();
     }, 530);
   }
 

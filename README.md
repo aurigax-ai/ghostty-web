@@ -29,7 +29,28 @@ pnpm build        # dist/ with the library and the WASM
 ```
 
 libghostty-vt's API is not stable yet, so `GHOSTTY_COMMIT` is raised on purpose, with the tests as
-the guard.
+the guard. The built `ghostty-vt.wasm` is committed so the package installs without Zig; the build
+is reproducible and CI fails if the committed file differs from a fresh build of the pinned commit.
+The package exports its TypeScript source (`lib/index.ts`), for bundlers such as Vite.
+
+## Host hooks
+
+Besides the xterm.js-shaped API, `Terminal` exposes what libghostty-vt reports, at its exact place
+in the output stream:
+
+| Hook                      | What it reports                                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `onSemanticPrompt`        | OSC 133 prompt marks (`prompt-start`, `input-start`, `output-start`, `command-end` with the exit code) |
+| `onPwdChange`             | OSC 7 as sent: the raw `file://host/path` URI                                                          |
+| `onDesktopNotification`   | OSC 9 and OSC 777 notifications                                                                        |
+| `onUnknownOsc`            | OSCs Ghostty does not implement, e.g. `633;E;…`                                                        |
+| `onBell`, `onTitleChange` | Ghostty's own bell and title                                                                           |
+| `clipboardWriteHandler`   | Decides OSC 52 writes (denied unless it returns true); reads are never answered                        |
+| `registerMarker(offset)`  | An xterm.js-style marker that follows its line through scrolling and reflow                            |
+| `modes.mouseTrackingMode` | `none`, `x10`, `vt200`, `drag` or `any`                                                                |
+
+The render loop runs only while something changes (output, input, scrolling, selection, cursor
+blink) and sleeps otherwise.
 
 ## Use
 

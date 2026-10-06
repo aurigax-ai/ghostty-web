@@ -123,28 +123,32 @@ export class Buffer implements IBuffer {
     return this.bufferType;
   }
 
+  /** Read from the terminal itself, so it is exact even inside a hook that runs mid-write. */
   get cursorX(): number {
     const wasmTerm = this.getWasmTerm();
     if (!wasmTerm) return 0;
-    return wasmTerm.getCursor().x;
+    return wasmTerm.cursorPosition().x;
   }
 
   get cursorY(): number {
     const wasmTerm = this.getWasmTerm();
     if (!wasmTerm) return 0;
-    return wasmTerm.getCursor().y;
+    return wasmTerm.cursorPosition().y;
   }
 
+  /** The absolute line at the top of the viewport (baseY when scrolled to the bottom). */
   get viewportY(): number {
-    // Get viewport offset from Terminal
-    // For now, return 0 (no scrollback navigation implemented yet)
-    return 0;
+    if (this.bufferType === 'alternate') return 0;
+    const scrolledBack = Math.round((this.terminal as any).viewportY ?? 0);
+    return Math.max(0, this.baseY - scrolledBack);
   }
 
+  /** The absolute line of the active area's top row: the scrollback length for the normal buffer. */
   get baseY(): number {
-    // For normal buffer: 0
-    // For alternate buffer: 0 (alternate has no scrollback)
-    return 0;
+    if (this.bufferType === 'alternate') return 0;
+    const wasmTerm = this.getWasmTerm();
+    if (!wasmTerm) return 0;
+    return wasmTerm.getScrollbackLength();
   }
 
   get length(): number {

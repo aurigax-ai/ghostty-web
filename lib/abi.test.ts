@@ -3,14 +3,14 @@ import { Ghostty } from './ghostty';
 
 describe('Abi', () => {
   test('reads struct layouts from ghostty_type_json and refuses unknown fields', async () => {
-    const { abi } = await Ghostty.load();
+    const { abi } = await Ghostty.load(`${process.cwd()}/ghostty-vt.wasm`);
     expect(abi.offset('GhosttyGridRef', 'x')).toBeGreaterThan(0);
     expect(() => abi.offset('GhosttyGridRef', 'no_such_field')).toThrow(/no field/);
     expect(() => abi.enumValue('GhosttyTerminalOption', 'NO_SUCH_OPTION')).toThrow(/no value/);
   });
 
   test('delivers a callback from libghostty-vt into JavaScript, in stream order', async () => {
-    const ghostty = await Ghostty.load();
+    const ghostty = await Ghostty.load(`${process.cwd()}/ghostty-vt.wasm`);
     const { abi } = ghostty;
     const term = ghostty.createTerminal(80, 24);
     const kindOffset = abi.offset('GhosttyTerminalSemanticPrompt', 'kind');
@@ -39,7 +39,7 @@ describe('Abi', () => {
   });
 
   test('answers a device status report through the write_pty callback', async () => {
-    const ghostty = await Ghostty.load();
+    const ghostty = await Ghostty.load(`${process.cwd()}/ghostty-vt.wasm`);
     const term = ghostty.createTerminal(80, 24);
     term.write('ab\x1b[6n');
     expect(term.readResponse()).toBe('\x1b[1;3R');
