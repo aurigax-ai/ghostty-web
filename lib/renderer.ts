@@ -1,15 +1,14 @@
 /**
- * Canvas Renderer for Terminal Display
+ * Terminal renderers.
  *
- * High-performance canvas-based renderer that draws the terminal using
- * Ghostty's WASM terminal emulator. Features:
- * - Font metrics measurement with DPI scaling
- * - Full color support (256-color palette + RGB)
- * - All text styles (bold, italic, underline, strikethrough, etc.)
- * - Multiple cursor styles (block, underline, bar)
- * - Dirty line optimization for 60 FPS
+ * `TerminalRenderer` decides what changed in a frame (dirty rows, cursor,
+ * selection, hovered links, scrolling) and owns the state every renderer
+ * shares; `CanvasRenderer` draws with Canvas 2D and `WebglRenderer`
+ * (webgl-renderer.ts) with WebGL 2. Both draw box drawing and block elements
+ * from geometry (box-glyphs.ts) so they fill their cells.
  */
 
+import { drawBoxGlyph, isBoxGlyph } from './box-glyphs';
 import type { ITheme } from './interfaces';
 import type { SelectionManager } from './selection-manager';
 import type { GhosttyCell } from './types';
@@ -35,6 +34,17 @@ export interface IRenderable {
 export interface IScrollbackProvider {
   getScrollbackLine(offset: number): GhosttyCell[] | null;
   getScrollbackLength(): number;
+}
+
+export const LINK_COLOR = '#4A90E2';
+export const TEXT_STYLE_FLAGS = CellFlags.BOLD | CellFlags.ITALIC | CellFlags.FAINT;
+
+export function isBlank(cell: GhosttyCell): boolean {
+  return (cell.codepoint === 0 || cell.codepoint === 32) && cell.grapheme_len === 0;
+}
+
+function isPlainAscii(cell: GhosttyCell): boolean {
+  return cell.width === 1 && cell.grapheme_len === 0 && cell.codepoint > 32 && cell.codepoint < 127;
 }
 
 // ============================================================================
@@ -87,661 +97,302 @@ export const DEFAULT_THEME: Required<ITheme> = {
   brightWhite: '#ffffff',
 };
 
+export type CursorStyle = 'block' | 'underline' | 'bar';
+
+export interface LinkRange {
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+}
+
+/** What a renderer draws over the rows once they are up to date. */
+export interface FrameOverlay {
+  cursorX: number;
+  cursorY: number;
+  /** Cursor shown: at the bottom of the scrollback, visible, and in the blink's on phase. */
+  showCursor: boolean;
+  viewportY: number;
+  scrollbackLength: number;
+  cols: number;
+  rows: number;
+  /** Scrollbar opacity, 0 when there is no scrollback provider. */
+  scrollbarOpacity: number;
+}
+
+/** Measures the cell box of a font: width of 'M' and height from its ascent and descent. */
+export function measureCell(fontSize: number, fontFamily: string): FontMetrics {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d')!;
+  ctx.font = `${fontSize}px ${fontFamily}`;
+  const widthMetrics = ctx.measureText('M');
+  const width = Math.ceil(widthMetrics.width);
+  const ascent = widthMetrics.actualBoundingBoxAscent || fontSize * 0.8;
+  const descent = widthMetrics.actualBoundingBoxDescent || fontSize * 0.2;
+  const height = Math.ceil(ascent + descent) + 2;
+  const baseline = Math.ceil(ascent) + 1;
+  return { width, height, baseline };
+}
+
 // ============================================================================
-// CanvasRenderer Class
+// TerminalRenderer: what to draw each frame
 // ============================================================================
 
-export class CanvasRenderer {
-  private canvas: HTMLCanvasElement;
-  private ctx: CanvasRenderingContext2D;
-  private fontSize: number;
-  private fontFamily: string;
-  private cursorStyle: 'block' | 'underline' | 'bar';
-  private cursorBlink: boolean;
-  private theme: Required<ITheme>;
-  private devicePixelRatio: number;
-  private metrics: FontMetrics;
+export abstract class TerminalRenderer {
+  protected readonly canvas: HTMLCanvasElement;
+  protected fontSize: number;
+  protected fontFamily: string;
+  protected cursorStyle: CursorStyle;
+  protected cursorBlink: boolean;
+  protected theme: Required<ITheme>;
+  protected devicePixelRatio: number;
+  protected metrics: FontMetrics;
 
-  // Cursor blinking state
-  private cursorVisible: boolean = true;
+  protected cursorVisible = true;
   private cursorBlinkInterval?: number;
 
   /** Called when the renderer needs another frame (cursor blink), so an idle render loop wakes. */
   public onNeedsFrame?: () => void;
-  private lastCursorPosition: { x: number; y: number } = { x: 0, y: 0 };
+  protected lastCursorPosition: { x: number; y: number } = { x: 0, y: 0 };
+  private lastViewportY = 0;
+  private fullRedrawPending = false;
 
-  // Viewport tracking (for scrolling)
-  private lastViewportY: number = 0;
+  /** The buffer of the frame being drawn, for grapheme lookups. */
+  protected currentBuffer: IRenderable | null = null;
 
-  // Current buffer being rendered (for grapheme lookups)
-  private currentBuffer: IRenderable | null = null;
-
-  // Selection manager (for rendering selection)
-  private selectionManager?: SelectionManager;
-  // Cached selection coordinates for current render pass (viewport-relative)
-  private currentSelectionCoords: {
+  protected selectionManager?: SelectionManager;
+  /** Selection of the frame being drawn, viewport-relative. */
+  protected currentSelectionCoords: {
     startCol: number;
     startRow: number;
     endCol: number;
     endRow: number;
   } | null = null;
 
-  // Link rendering state
-  private hoveredHyperlinkId: number = 0;
-  private previousHoveredHyperlinkId: number = 0;
+  protected hoveredHyperlinkId = 0;
+  private previousHoveredHyperlinkId = 0;
+  protected hoveredLinkRange: LinkRange | null = null;
+  private previousHoveredLinkRange: LinkRange | null = null;
 
-  // Regex link hover tracking (for links without hyperlink_id)
-  private hoveredLinkRange: { startX: number; startY: number; endX: number; endY: number } | null =
-    null;
-  private previousHoveredLinkRange: {
-    startX: number;
-    startY: number;
-    endX: number;
-    endY: number;
-  } | null = null;
+  /** Whether a moved or blinking cursor needs its row redrawn (false when the cursor is an overlay). */
+  protected abstract readonly cursorInRows: boolean;
 
   constructor(canvas: HTMLCanvasElement, options: RendererOptions = {}) {
     this.canvas = canvas;
-    const ctx = canvas.getContext('2d', { alpha: true });
-    if (!ctx) {
-      throw new Error('Failed to get 2D rendering context');
-    }
-    this.ctx = ctx;
-
-    // Apply options
     this.fontSize = options.fontSize ?? 15;
     this.fontFamily = options.fontFamily ?? 'monospace';
     this.cursorStyle = options.cursorStyle ?? 'block';
     this.cursorBlink = options.cursorBlink ?? false;
     this.theme = { ...DEFAULT_THEME, ...options.theme };
     this.devicePixelRatio = options.devicePixelRatio ?? window.devicePixelRatio ?? 1;
-
-    // Measure font metrics
-    this.metrics = this.measureFont();
-
-    // Setup cursor blinking if enabled
-    if (this.cursorBlink) {
-      this.startCursorBlink();
-    }
+    this.metrics = measureCell(this.fontSize, this.fontFamily);
+    if (this.cursorBlink) this.startCursorBlink();
   }
 
-  // ==========================================================================
-  // Font Metrics Measurement
-  // ==========================================================================
+  /** Draws one viewport row. */
+  protected abstract drawLine(line: GhosttyCell[], y: number, cols: number): void;
+  /** Whether the drawing surface no longer matches cols × rows. */
+  protected abstract surfaceMismatch(cols: number, rows: number): boolean;
+  /** Draws the cursor and scrollbar and presents the frame. */
+  protected abstract finishFrame(overlay: FrameOverlay): void;
+  /** Resize the drawing surface to cols × rows cells. */
+  public abstract resize(cols: number, rows: number): void;
+  /** Clear the whole surface to the theme background. */
+  public abstract clear(): void;
+  /** Called after the font or its metrics changed. */
+  protected abstract fontChanged(): void;
 
-  private measureFont(): FontMetrics {
-    // Use an offscreen canvas for measurement
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d')!;
-
-    // Set font (use actual pixel size for accurate measurement)
-    ctx.font = `${this.fontSize}px ${this.fontFamily}`;
-
-    // Measure width using 'M' (typically widest character)
-    const widthMetrics = ctx.measureText('M');
-    const width = Math.ceil(widthMetrics.width);
-
-    // Measure height using ascent + descent with padding for glyph overflow
-    const ascent = widthMetrics.actualBoundingBoxAscent || this.fontSize * 0.8;
-    const descent = widthMetrics.actualBoundingBoxDescent || this.fontSize * 0.2;
-
-    // Add 2px padding to height to account for glyphs that overflow (like 'f', 'd', 'g', 'p')
-    // and anti-aliasing pixels
-    const height = Math.ceil(ascent + descent) + 2;
-    const baseline = Math.ceil(ascent) + 1; // Offset baseline by half the padding
-
-    return { width, height, baseline };
-  }
-
-  /**
-   * Remeasure font metrics (call after font loads or changes)
-   */
-  public remeasureFont(): void {
-    this.metrics = this.measureFont();
-  }
-
-  // ==========================================================================
-  // Color Conversion
-  // ==========================================================================
-
-  private rgbToCSS(r: number, g: number, b: number): string {
-    return `rgb(${r}, ${g}, ${b})`;
-  }
-
-  // ==========================================================================
-  // Canvas Sizing
-  // ==========================================================================
-
-  /**
-   * Resize canvas to fit terminal dimensions
-   */
-  public resize(cols: number, rows: number): void {
-    const cssWidth = cols * this.metrics.width;
-    const cssHeight = rows * this.metrics.height;
-
-    // Set CSS size (what user sees)
-    this.canvas.style.width = `${cssWidth}px`;
-    this.canvas.style.height = `${cssHeight}px`;
-
-    // Set actual canvas size (scaled for DPI)
-    this.canvas.width = cssWidth * this.devicePixelRatio;
-    this.canvas.height = cssHeight * this.devicePixelRatio;
-
-    // Scale context to match DPI (setting canvas.width/height resets the context)
-    this.ctx.scale(this.devicePixelRatio, this.devicePixelRatio);
-
-    // Set text rendering properties for crisp text
-    this.ctx.textBaseline = 'alphabetic';
-    this.ctx.textAlign = 'left';
-
-    // Fill background after resize
-    this.ctx.fillStyle = this.theme.background;
-    this.ctx.fillRect(0, 0, cssWidth, cssHeight);
-  }
-
-  // ==========================================================================
-  // Main Rendering
-  // ==========================================================================
-
-  /**
-   * Render the terminal buffer to canvas
-   */
   public render(
     buffer: IRenderable,
-    forceAll: boolean = false,
-    viewportY: number = 0,
+    forceAll = false,
+    viewportY = 0,
     scrollbackProvider?: IScrollbackProvider,
-    scrollbarOpacity: number = 1
+    scrollbarOpacity = 1
   ): void {
-    // Store buffer reference for grapheme lookups in renderCell
     this.currentBuffer = buffer;
-
-    // getCursor() calls update() internally to ensure fresh state.
-    // Multiple update() calls are safe - dirty state persists until clearDirty().
     const cursor = buffer.getCursor();
     const dims = buffer.getDimensions();
     const scrollbackLength = scrollbackProvider ? scrollbackProvider.getScrollbackLength() : 0;
 
-    // Check if buffer needs full redraw (e.g., screen change between normal/alternate)
-    if (buffer.needsFullRedraw?.()) {
+    if (buffer.needsFullRedraw?.()) forceAll = true;
+    if (this.fullRedrawPending) {
+      forceAll = true;
+      this.fullRedrawPending = false;
+    }
+    if (this.surfaceMismatch(dims.cols, dims.rows)) {
+      this.resize(dims.cols, dims.rows);
       forceAll = true;
     }
-
-    // Resize canvas if dimensions changed
-    const needsResize =
-      this.canvas.width !== dims.cols * this.metrics.width * this.devicePixelRatio ||
-      this.canvas.height !== dims.rows * this.metrics.height * this.devicePixelRatio;
-
-    if (needsResize) {
-      this.resize(dims.cols, dims.rows);
-      forceAll = true; // Force full render after resize
-    }
-
-    // Force re-render when viewport changes (scrolling)
     if (viewportY !== this.lastViewportY) {
       forceAll = true;
       this.lastViewportY = viewportY;
     }
 
-    // Check if cursor position changed or if blinking (need to redraw cursor line)
     const cursorMoved =
       cursor.x !== this.lastCursorPosition.x || cursor.y !== this.lastCursorPosition.y;
-    if (cursorMoved || this.cursorBlink) {
-      // Mark cursor lines as needing redraw
+    if (this.cursorInRows && (cursorMoved || this.cursorBlink)) {
       if (!forceAll && !buffer.isRowDirty(cursor.y)) {
-        // Need to redraw cursor line
         const line = buffer.getLine(cursor.y);
-        if (line) {
-          this.renderLine(line, cursor.y, dims.cols);
-        }
+        if (line) this.drawLine(line, cursor.y, dims.cols);
       }
       if (cursorMoved && this.lastCursorPosition.y !== cursor.y) {
-        // Also redraw old cursor line if cursor moved to different line
         if (!forceAll && !buffer.isRowDirty(this.lastCursorPosition.y)) {
           const line = buffer.getLine(this.lastCursorPosition.y);
-          if (line) {
-            this.renderLine(line, this.lastCursorPosition.y, dims.cols);
-          }
+          if (line) this.drawLine(line, this.lastCursorPosition.y, dims.cols);
         }
       }
     }
 
-    // Check if we need to redraw selection-related lines
-    const hasSelection = this.selectionManager && this.selectionManager.hasSelection();
     const selectionRows = new Set<number>();
-
-    // Cache selection coordinates for use during cell rendering
-    // This is used by isInSelection() to determine if a cell needs selection colors
+    const hasSelection = this.selectionManager?.hasSelection();
     this.currentSelectionCoords = hasSelection ? this.selectionManager!.getSelectionCoords() : null;
-
-    // Mark current selection rows for redraw (includes programmatic selections)
     if (this.currentSelectionCoords) {
       const coords = this.currentSelectionCoords;
-      for (let row = coords.startRow; row <= coords.endRow; row++) {
-        selectionRows.add(row);
-      }
+      for (let row = coords.startRow; row <= coords.endRow; row++) selectionRows.add(row);
     }
-
-    // Always mark dirty selection rows for redraw (to clear old overlay)
     if (this.selectionManager) {
       const dirtyRows = this.selectionManager.getDirtySelectionRows();
       if (dirtyRows.size > 0) {
-        for (const row of dirtyRows) {
-          selectionRows.add(row);
-        }
-        // Clear the dirty rows tracking after marking for redraw
+        for (const row of dirtyRows) selectionRows.add(row);
         this.selectionManager.clearDirtySelectionRows();
       }
     }
 
-    // Track rows with hyperlinks that need redraw when hover changes
-    const hyperlinkRows = new Set<number>();
-    const hyperlinkChanged = this.hoveredHyperlinkId !== this.previousHoveredHyperlinkId;
-    const linkRangeChanged =
-      JSON.stringify(this.hoveredLinkRange) !== JSON.stringify(this.previousHoveredLinkRange);
-
-    if (hyperlinkChanged) {
-      // Find rows containing the old or new hovered hyperlink
-      // Must check the correct buffer based on viewportY (scrollback vs screen)
-      for (let y = 0; y < dims.rows; y++) {
-        let line: GhosttyCell[] | null = null;
-
-        // Same logic as rendering: fetch from scrollback or screen
-        if (viewportY > 0) {
-          if (y < viewportY && scrollbackProvider) {
-            // This row is from scrollback
-            // Floor viewportY for array access (handles fractional values during smooth scroll)
-            const scrollbackOffset = scrollbackLength - Math.floor(viewportY) + y;
-            line = scrollbackProvider.getScrollbackLine(scrollbackOffset);
-          } else {
-            // This row is from visible screen
-            const screenRow = y - Math.floor(viewportY);
-            line = buffer.getLine(screenRow);
-          }
-        } else {
-          // At bottom - fetch from visible screen
-          line = buffer.getLine(y);
+    const lineAt = (y: number): GhosttyCell[] | null => {
+      if (viewportY > 0) {
+        if (y < viewportY && scrollbackProvider) {
+          return scrollbackProvider.getScrollbackLine(scrollbackLength - Math.floor(viewportY) + y);
         }
+        return buffer.getLine(y - Math.floor(viewportY));
+      }
+      return buffer.getLine(y);
+    };
 
-        if (line) {
-          for (const cell of line) {
-            if (
-              cell.hyperlink_id === this.hoveredHyperlinkId ||
-              cell.hyperlink_id === this.previousHoveredHyperlinkId
-            ) {
-              hyperlinkRows.add(y);
-              break; // Found hyperlink in this row
-            }
+    const hyperlinkRows = new Set<number>();
+    if (this.hoveredHyperlinkId !== this.previousHoveredHyperlinkId) {
+      for (let y = 0; y < dims.rows; y++) {
+        const line = lineAt(y);
+        if (!line) continue;
+        for (const cell of line) {
+          if (
+            cell.hyperlink_id === this.hoveredHyperlinkId ||
+            cell.hyperlink_id === this.previousHoveredHyperlinkId
+          ) {
+            hyperlinkRows.add(y);
+            break;
           }
         }
       }
-      // Update previous state
       this.previousHoveredHyperlinkId = this.hoveredHyperlinkId;
     }
-
-    // Track rows affected by link range changes (for regex URLs)
-    if (linkRangeChanged) {
-      // Add rows from old range
-      if (this.previousHoveredLinkRange) {
-        for (
-          let y = this.previousHoveredLinkRange.startY;
-          y <= this.previousHoveredLinkRange.endY;
-          y++
-        ) {
-          hyperlinkRows.add(y);
-        }
-      }
-      // Add rows from new range
-      if (this.hoveredLinkRange) {
-        for (let y = this.hoveredLinkRange.startY; y <= this.hoveredLinkRange.endY; y++) {
-          hyperlinkRows.add(y);
-        }
+    if (!sameRange(this.hoveredLinkRange, this.previousHoveredLinkRange)) {
+      for (const range of [this.previousHoveredLinkRange, this.hoveredLinkRange]) {
+        if (!range) continue;
+        for (let y = range.startY; y <= range.endY; y++) hyperlinkRows.add(y);
       }
       this.previousHoveredLinkRange = this.hoveredLinkRange;
     }
 
-    // Determine which rows need rendering.
-    // We also include adjacent rows (above and below) for each dirty row to handle
-    // glyph overflow - tall glyphs like Devanagari vowel signs can extend into
-    // adjacent rows' visual space.
     const rowsToRender = new Set<number>();
     for (let y = 0; y < dims.rows; y++) {
-      // When scrolled, always force render all lines since we're showing scrollback
       const needsRender =
-        viewportY > 0
-          ? true
-          : forceAll || buffer.isRowDirty(y) || selectionRows.has(y) || hyperlinkRows.has(y);
-
+        viewportY > 0 ||
+        forceAll ||
+        buffer.isRowDirty(y) ||
+        selectionRows.has(y) ||
+        hyperlinkRows.has(y);
       if (needsRender) {
         rowsToRender.add(y);
-        // Include adjacent rows to handle glyph overflow
         if (y > 0) rowsToRender.add(y - 1);
         if (y < dims.rows - 1) rowsToRender.add(y + 1);
       }
     }
-
-    // Render each line
     for (let y = 0; y < dims.rows; y++) {
-      if (!rowsToRender.has(y)) {
-        continue;
-      }
-
-      // Fetch line from scrollback or visible screen
-      let line: GhosttyCell[] | null = null;
-      if (viewportY > 0) {
-        // Scrolled up - need to fetch from scrollback + visible screen
-        // When scrolled up N lines, we want to show:
-        // - Scrollback lines (from the end) + visible screen lines
-
-        // Check if this row should come from scrollback or visible screen
-        if (y < viewportY && scrollbackProvider) {
-          // This row is from scrollback (upper part of viewport)
-          // Get from end of scrollback buffer
-          // Floor viewportY for array access (handles fractional values during smooth scroll)
-          const scrollbackOffset = scrollbackLength - Math.floor(viewportY) + y;
-          line = scrollbackProvider.getScrollbackLine(scrollbackOffset);
-        } else {
-          // This row is from visible screen (lower part of viewport)
-          const screenRow = viewportY > 0 ? y - Math.floor(viewportY) : y;
-          line = buffer.getLine(screenRow);
-        }
-      } else {
-        // At bottom - fetch from visible screen
-        line = buffer.getLine(y);
-      }
-
-      if (line) {
-        this.renderLine(line, y, dims.cols);
-      }
+      if (!rowsToRender.has(y)) continue;
+      const line = lineAt(y);
+      if (line) this.drawLine(line, y, dims.cols);
     }
 
-    // Selection highlighting is now integrated into renderCellBackground/renderCellText
-    // No separate overlay pass needed - this fixes z-order issues with complex glyphs
-
-    // Link underlines are drawn during cell rendering (see renderCell)
-
-    // Render cursor (only if we're at the bottom, not scrolled)
-    if (viewportY === 0 && cursor.visible && this.cursorVisible) {
-      this.renderCursor(cursor.x, cursor.y);
-    }
-
-    // Render scrollbar if scrolled or scrollback exists (with opacity for fade effect)
-    if (scrollbackProvider && scrollbarOpacity > 0) {
-      this.renderScrollbar(viewportY, scrollbackLength, dims.rows, scrollbarOpacity);
-    }
-
-    // Update last cursor position
+    this.finishFrame({
+      cursorX: cursor.x,
+      cursorY: cursor.y,
+      showCursor: viewportY === 0 && cursor.visible && this.cursorVisible,
+      viewportY,
+      scrollbackLength,
+      cols: dims.cols,
+      rows: dims.rows,
+      scrollbarOpacity: scrollbackProvider ? scrollbarOpacity : 0,
+    });
     this.lastCursorPosition = { x: cursor.x, y: cursor.y };
-
-    // ALWAYS clear dirty flags after rendering, regardless of forceAll.
-    // This is critical - if we don't clear after a full redraw, the dirty
-    // state persists and the next frame might not detect new changes properly.
     buffer.clearDirty();
   }
 
-  /**
-   * Render a single line using two-pass approach:
-   * 1. First pass: Draw all cell backgrounds
-   * 2. Second pass: Draw all cell text and decorations
-   *
-   * This two-pass approach is necessary for proper rendering of complex scripts
-   * like Devanagari where diacritics (like vowel sign ि) can extend LEFT of the
-   * base character into the previous cell's visual area. If we draw backgrounds
-   * and text in a single pass (cell by cell), the background of cell N would
-   * cover any left-extending portions of graphemes from cell N-1.
-   */
-  private renderLine(line: GhosttyCell[], y: number, cols: number): void {
-    const lineY = y * this.metrics.height;
-    const lineWidth = cols * this.metrics.width;
+  // ==========================================================================
+  // Shared helpers
+  // ==========================================================================
 
-    // Clear line background then fill with theme color.
-    // We clear just the cell area - glyph overflow is handled by also
-    // redrawing adjacent rows (see render() method).
-    // clearRect is needed because fillRect composites rather than replaces,
-    // so transparent/translucent backgrounds wouldn't clear previous content.
-    this.ctx.clearRect(0, lineY, lineWidth, this.metrics.height);
-    this.ctx.fillStyle = this.theme.background;
-    this.ctx.fillRect(0, lineY, lineWidth, this.metrics.height);
-
-    // PASS 1: Draw all cell backgrounds first
-    // This ensures all backgrounds are painted before any text, allowing text
-    // to "bleed" across cell boundaries without being covered by adjacent backgrounds
-    for (let x = 0; x < line.length; x++) {
-      const cell = line[x];
-      if (cell.width === 0) continue; // Skip spacer cells for wide characters
-      this.renderCellBackground(cell, x, y);
-    }
-
-    // PASS 2: Draw all cell text and decorations
-    // Now text can safely extend beyond cell boundaries (for complex scripts)
-    for (let x = 0; x < line.length; x++) {
-      const cell = line[x];
-      if (cell.width === 0) continue; // Skip spacer cells for wide characters
-      this.renderCellText(cell, x, y);
-    }
+  /** Makes the next frame redraw every row. */
+  protected requestFullRedraw(): void {
+    this.fullRedrawPending = true;
   }
 
-  /**
-   * Render a cell's background only (Pass 1 of two-pass rendering)
-   * Selection highlighting is integrated here to avoid z-order issues with
-   * complex glyphs (like Devanagari) that extend outside their cell bounds.
-   */
-  private renderCellBackground(cell: GhosttyCell, x: number, y: number): void {
-    const cellX = x * this.metrics.width;
-    const cellY = y * this.metrics.height;
-    const cellWidth = this.metrics.width * cell.width;
-
-    // Check if this cell is selected
-    const isSelected = this.isInSelection(x, y);
-
-    if (isSelected) {
-      // Draw selection background (solid color, not overlay)
-      this.ctx.fillStyle = this.theme.selectionBackground;
-      this.ctx.fillRect(cellX, cellY, cellWidth, this.metrics.height);
-      return; // Selection background replaces cell background
-    }
-
-    // Extract background color and handle inverse
-    let bg_r = cell.bg_r,
-      bg_g = cell.bg_g,
-      bg_b = cell.bg_b;
-
-    if (cell.flags & CellFlags.INVERSE) {
-      // When inverted, background becomes foreground
-      bg_r = cell.fg_r;
-      bg_g = cell.fg_g;
-      bg_b = cell.fg_b;
-    }
-
-    // Only draw cell background if it's different from the default (black)
-    // This lets the theme background (drawn earlier) show through for default cells
-    const isDefaultBg = bg_r === 0 && bg_g === 0 && bg_b === 0;
-    if (!isDefaultBg) {
-      this.ctx.fillStyle = this.rgbToCSS(bg_r, bg_g, bg_b);
-      this.ctx.fillRect(cellX, cellY, cellWidth, this.metrics.height);
-    }
-  }
-
-  /**
-   * Render a cell's text and decorations (Pass 2 of two-pass rendering)
-   * Selection foreground color is applied here to match the selection background.
-   */
-  private renderCellText(cell: GhosttyCell, x: number, y: number, colorOverride?: string): void {
-    const cellX = x * this.metrics.width;
-    const cellY = y * this.metrics.height;
-    const cellWidth = this.metrics.width * cell.width;
-
-    // Skip rendering if invisible
-    if (cell.flags & CellFlags.INVISIBLE) {
-      return;
-    }
-
-    // Check if this cell is selected
-    const isSelected = this.isInSelection(x, y);
-
-    // Set text style
-    let fontStyle = '';
-    if (cell.flags & CellFlags.ITALIC) fontStyle += 'italic ';
-    if (cell.flags & CellFlags.BOLD) fontStyle += 'bold ';
-    this.ctx.font = `${fontStyle}${this.fontSize}px ${this.fontFamily}`;
-
-    // Set text color - use override, selection foreground, or normal color
-    if (colorOverride) {
-      this.ctx.fillStyle = colorOverride;
-    } else if (isSelected) {
-      this.ctx.fillStyle = this.theme.selectionForeground;
-    } else {
-      // Extract colors and handle inverse
-      let fg_r = cell.fg_r,
-        fg_g = cell.fg_g,
-        fg_b = cell.fg_b;
-
-      if (cell.flags & CellFlags.INVERSE) {
-        // When inverted, foreground becomes background
-        fg_r = cell.bg_r;
-        fg_g = cell.bg_g;
-        fg_b = cell.bg_b;
-      }
-
-      this.ctx.fillStyle = this.rgbToCSS(fg_r, fg_g, fg_b);
-    }
-
-    // Apply faint effect
-    if (cell.flags & CellFlags.FAINT) {
-      this.ctx.globalAlpha = 0.5;
-    }
-
-    // Draw text
-    const textX = cellX;
-    const textY = cellY + this.metrics.baseline;
-
-    // Get the character to render - use grapheme lookup for complex scripts
-    let char: string;
+  /** The text of a cell: its grapheme cluster when it has one, else its codepoint. */
+  protected cellText(cell: GhosttyCell, x: number, y: number): string {
     if (cell.grapheme_len > 0 && this.currentBuffer?.getGraphemeString) {
-      // Cell has additional codepoints - get full grapheme cluster
-      char = this.currentBuffer.getGraphemeString(y, x);
-    } else {
-      // Simple cell - single codepoint
-      char = String.fromCodePoint(cell.codepoint || 32); // Default to space if null
+      return this.currentBuffer.getGraphemeString(y, x);
     }
-    this.ctx.fillText(char, textX, textY);
-
-    // Reset alpha
-    if (cell.flags & CellFlags.FAINT) {
-      this.ctx.globalAlpha = 1.0;
-    }
-
-    // Draw underline
-    if (cell.flags & CellFlags.UNDERLINE) {
-      const underlineY = cellY + this.metrics.baseline + 2;
-      this.ctx.strokeStyle = this.ctx.fillStyle;
-      this.ctx.lineWidth = 1;
-      this.ctx.beginPath();
-      this.ctx.moveTo(cellX, underlineY);
-      this.ctx.lineTo(cellX + cellWidth, underlineY);
-      this.ctx.stroke();
-    }
-
-    // Draw strikethrough
-    if (cell.flags & CellFlags.STRIKETHROUGH) {
-      const strikeY = cellY + this.metrics.height / 2;
-      this.ctx.strokeStyle = this.ctx.fillStyle;
-      this.ctx.lineWidth = 1;
-      this.ctx.beginPath();
-      this.ctx.moveTo(cellX, strikeY);
-      this.ctx.lineTo(cellX + cellWidth, strikeY);
-      this.ctx.stroke();
-    }
-
-    // Draw hyperlink underline (for OSC8 hyperlinks)
-    if (cell.hyperlink_id > 0) {
-      const isHovered = cell.hyperlink_id === this.hoveredHyperlinkId;
-
-      // Only show underline when hovered (cleaner look)
-      if (isHovered) {
-        const underlineY = cellY + this.metrics.baseline + 2;
-        this.ctx.strokeStyle = '#4A90E2'; // Blue underline on hover
-        this.ctx.lineWidth = 1;
-        this.ctx.beginPath();
-        this.ctx.moveTo(cellX, underlineY);
-        this.ctx.lineTo(cellX + cellWidth, underlineY);
-        this.ctx.stroke();
-      }
-    }
-
-    // Draw regex link underline (for plain text URLs)
-    if (this.hoveredLinkRange) {
-      const range = this.hoveredLinkRange;
-      // Check if this cell is within the hovered link range
-      const isInRange =
-        (y === range.startY && x >= range.startX && (y < range.endY || x <= range.endX)) ||
-        (y > range.startY && y < range.endY) ||
-        (y === range.endY && x <= range.endX && (y > range.startY || x >= range.startX));
-
-      if (isInRange) {
-        const underlineY = cellY + this.metrics.baseline + 2;
-        this.ctx.strokeStyle = '#4A90E2'; // Blue underline on hover
-        this.ctx.lineWidth = 1;
-        this.ctx.beginPath();
-        this.ctx.moveTo(cellX, underlineY);
-        this.ctx.lineTo(cellX + cellWidth, underlineY);
-        this.ctx.stroke();
-      }
-    }
+    return String.fromCodePoint(cell.codepoint || 32);
   }
 
-  /**
-   * Render cursor
-   */
-  private renderCursor(x: number, y: number): void {
-    const cursorX = x * this.metrics.width;
-    const cursorY = y * this.metrics.height;
+  protected isInSelection(x: number, y: number): boolean {
+    const sel = this.currentSelectionCoords;
+    if (!sel) return false;
+    const { startCol, startRow, endCol, endRow } = sel;
+    if (startRow === endRow) return y === startRow && x >= startCol && x <= endCol;
+    if (y === startRow) return x >= startCol;
+    if (y === endRow) return x <= endCol;
+    return y > startRow && y < endRow;
+  }
 
-    this.ctx.fillStyle = this.theme.cursor;
+  /** Whether the cell has a hovered link under it (OSC 8 id or a detected URL range). */
+  protected linkHovered(cell: GhosttyCell, x: number, y: number): boolean {
+    if (cell.hyperlink_id > 0 && cell.hyperlink_id === this.hoveredHyperlinkId) return true;
+    const range = this.hoveredLinkRange;
+    if (!range) return false;
+    return (
+      (y === range.startY && x >= range.startX && (y < range.endY || x <= range.endX)) ||
+      (y > range.startY && y < range.endY) ||
+      (y === range.endY && x <= range.endX && (y > range.startY || x >= range.startX))
+    );
+  }
 
-    switch (this.cursorStyle) {
-      case 'block':
-        // Full cell block
-        this.ctx.fillRect(cursorX, cursorY, this.metrics.width, this.metrics.height);
-        // Re-draw character under cursor with cursorAccent color
-        {
-          const line = this.currentBuffer?.getLine(y);
-          if (line?.[x]) {
-            this.ctx.save();
-            this.ctx.beginPath();
-            this.ctx.rect(cursorX, cursorY, this.metrics.width, this.metrics.height);
-            this.ctx.clip();
-            this.renderCellText(line[x], x, y, this.theme.cursorAccent);
-            this.ctx.restore();
-          }
-        }
-        break;
-
-      case 'underline':
-        // Underline at bottom of cell
-        const underlineHeight = Math.max(2, Math.floor(this.metrics.height * 0.15));
-        this.ctx.fillRect(
-          cursorX,
-          cursorY + this.metrics.height - underlineHeight,
-          this.metrics.width,
-          underlineHeight
-        );
-        break;
-
-      case 'bar':
-        // Vertical bar at left of cell
-        const barWidth = Math.max(2, Math.floor(this.metrics.width * 0.15));
-        this.ctx.fillRect(cursorX, cursorY, barWidth, this.metrics.height);
-        break;
-    }
+  /** Scrollbar geometry in CSS pixels, or null when there is nothing to draw. */
+  protected scrollbarThumb(overlay: FrameOverlay): {
+    x: number;
+    trackY: number;
+    trackHeight: number;
+    thumbY: number;
+    thumbHeight: number;
+    width: number;
+  } | null {
+    if (overlay.scrollbarOpacity <= 0 || overlay.scrollbackLength === 0) return null;
+    const height = overlay.rows * this.metrics.height;
+    const width = 8;
+    const x = overlay.cols * this.metrics.width - width - 4;
+    const padding = 4;
+    const trackHeight = height - padding * 2;
+    const total = overlay.scrollbackLength + overlay.rows;
+    const thumbHeight = Math.max(20, (overlay.rows / total) * trackHeight);
+    const position = overlay.viewportY / overlay.scrollbackLength;
+    const thumbY = padding + (trackHeight - thumbHeight) * (1 - position);
+    return { x, trackY: padding, trackHeight, thumbY, thumbHeight, width };
   }
 
   // ==========================================================================
-  // Cursor Blinking
+  // Cursor blinking
   // ==========================================================================
 
   private startCursorBlink(): void {
-    // xterm.js uses ~530ms blink interval
     this.cursorBlinkInterval = window.setInterval(() => {
       this.cursorVisible = !this.cursorVisible;
       this.onNeedsFrame?.();
@@ -760,39 +411,29 @@ export class CanvasRenderer {
   // Public API
   // ==========================================================================
 
-  /**
-   * Update theme colors
-   */
+  public remeasureFont(): void {
+    this.metrics = measureCell(this.fontSize, this.fontFamily);
+    this.fontChanged();
+  }
+
   public setTheme(theme: ITheme): void {
     this.theme = { ...DEFAULT_THEME, ...theme };
   }
 
-  /**
-   * Update font size
-   */
   public setFontSize(size: number): void {
     this.fontSize = size;
-    this.metrics = this.measureFont();
+    this.remeasureFont();
   }
 
-  /**
-   * Update font family
-   */
   public setFontFamily(family: string): void {
     this.fontFamily = family;
-    this.metrics = this.measureFont();
+    this.remeasureFont();
   }
 
-  /**
-   * Update cursor style
-   */
-  public setCursorStyle(style: 'block' | 'underline' | 'bar'): void {
+  public setCursorStyle(style: CursorStyle): void {
     this.cursorStyle = style;
   }
 
-  /**
-   * Enable/disable cursor blinking
-   */
   public setCursorBlink(enabled: boolean): void {
     if (enabled && !this.cursorBlink) {
       this.cursorBlink = true;
@@ -803,156 +444,377 @@ export class CanvasRenderer {
     }
   }
 
-  /**
-   * Get current font metrics
-   */
-
-  /**
-   * Render scrollbar (Phase 2)
-   * Shows scroll position and allows click/drag interaction
-   * @param opacity Opacity level (0-1) for fade in/out effect
-   */
-  private renderScrollbar(
-    viewportY: number,
-    scrollbackLength: number,
-    visibleRows: number,
-    opacity: number = 1
-  ): void {
-    const ctx = this.ctx;
-    const canvasHeight = this.canvas.height / this.devicePixelRatio;
-    const canvasWidth = this.canvas.width / this.devicePixelRatio;
-
-    // Scrollbar dimensions
-    const scrollbarWidth = 8;
-    const scrollbarX = canvasWidth - scrollbarWidth - 4;
-    const scrollbarPadding = 4;
-    const scrollbarTrackHeight = canvasHeight - scrollbarPadding * 2;
-
-    // Always clear the scrollbar area first (fixes ghosting when fading out)
-    ctx.clearRect(scrollbarX - 2, 0, scrollbarWidth + 6, canvasHeight);
-    ctx.fillStyle = this.theme.background;
-    ctx.fillRect(scrollbarX - 2, 0, scrollbarWidth + 6, canvasHeight);
-
-    // Don't draw scrollbar if fully transparent or no scrollback
-    if (opacity <= 0 || scrollbackLength === 0) return;
-
-    // Calculate scrollbar thumb size and position
-    const totalLines = scrollbackLength + visibleRows;
-    const thumbHeight = Math.max(20, (visibleRows / totalLines) * scrollbarTrackHeight);
-
-    // Position: 0 = at bottom, scrollbackLength = at top
-    const scrollPosition = viewportY / scrollbackLength; // 0 to 1
-    const thumbY = scrollbarPadding + (scrollbarTrackHeight - thumbHeight) * (1 - scrollPosition);
-
-    // Draw scrollbar track (subtle background) with opacity
-    ctx.fillStyle = `rgba(128, 128, 128, ${0.1 * opacity})`;
-    ctx.fillRect(scrollbarX, scrollbarPadding, scrollbarWidth, scrollbarTrackHeight);
-
-    // Draw scrollbar thumb with opacity
-    const isScrolled = viewportY > 0;
-    const baseOpacity = isScrolled ? 0.5 : 0.3;
-    ctx.fillStyle = `rgba(128, 128, 128, ${baseOpacity * opacity})`;
-    ctx.fillRect(scrollbarX, thumbY, scrollbarWidth, thumbHeight);
-  }
   public getMetrics(): FontMetrics {
     return { ...this.metrics };
   }
 
-  /**
-   * Get canvas element (needed by SelectionManager)
-   */
+  /** The canvas that takes pointer events and defines the terminal's box. */
   public getCanvas(): HTMLCanvasElement {
     return this.canvas;
   }
 
-  /**
-   * Set selection manager (for rendering selection)
-   */
   public setSelectionManager(manager: SelectionManager): void {
     this.selectionManager = manager;
   }
 
-  /**
-   * Check if a cell at (x, y) is within the current selection.
-   * Uses cached selection coordinates for performance.
-   */
-  private isInSelection(x: number, y: number): boolean {
-    const sel = this.currentSelectionCoords;
-    if (!sel) return false;
-
-    const { startCol, startRow, endCol, endRow } = sel;
-
-    // Single line selection
-    if (startRow === endRow) {
-      return y === startRow && x >= startCol && x <= endCol;
-    }
-
-    // Multi-line selection
-    if (y === startRow) {
-      // First line: from startCol to end of line
-      return x >= startCol;
-    } else if (y === endRow) {
-      // Last line: from start of line to endCol
-      return x <= endCol;
-    } else if (y > startRow && y < endRow) {
-      // Middle lines: entire line is selected
-      return true;
-    }
-
-    return false;
-  }
-
-  /**
-   * Set the currently hovered hyperlink ID for rendering underlines
-   */
   public setHoveredHyperlinkId(hyperlinkId: number): void {
     this.hoveredHyperlinkId = hyperlinkId;
   }
 
-  /**
-   * Set the currently hovered link range for rendering underlines (for regex-detected URLs)
-   * Pass null to clear the hover state
-   */
-  public setHoveredLinkRange(
-    range: {
-      startX: number;
-      startY: number;
-      endX: number;
-      endY: number;
-    } | null
-  ): void {
+  public getHoveredHyperlinkId(): number {
+    return this.hoveredHyperlinkId;
+  }
+
+  /** Set the hovered range of a detected URL, or null to clear it. */
+  public setHoveredLinkRange(range: LinkRange | null): void {
     this.hoveredLinkRange = range;
   }
 
-  /**
-   * Get character cell width (for coordinate conversion)
-   */
   public get charWidth(): number {
     return this.metrics.width;
   }
 
-  /**
-   * Get character cell height (for coordinate conversion)
-   */
   public get charHeight(): number {
     return this.metrics.height;
   }
 
-  /**
-   * Clear entire canvas
-   */
+  public dispose(): void {
+    this.stopCursorBlink();
+  }
+}
+
+function sameRange(a: LinkRange | null, b: LinkRange | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.startX === b.startX && a.startY === b.startY && a.endX === b.endX && a.endY === b.endY;
+}
+
+// ============================================================================
+// CanvasRenderer
+// ============================================================================
+
+export class CanvasRenderer extends TerminalRenderer {
+  protected readonly cursorInRows = true;
+  private readonly ctx: CanvasRenderingContext2D;
+  private readonly batchText: boolean;
+  private readonly colorStrings = new Map<number, string>();
+  private fonts: string[] = [];
+  private readonly advances = new Map<string, number>();
+  private currentFill = '';
+  private currentFont = '';
+
+  constructor(canvas: HTMLCanvasElement, options: RendererOptions = {}) {
+    super(canvas, options);
+    const ctx = canvas.getContext('2d', { alpha: true });
+    if (!ctx) throw new Error('Failed to get 2D rendering context');
+    this.ctx = ctx;
+    this.batchText = typeof ctx.letterSpacing === 'string';
+  }
+
+  protected surfaceMismatch(cols: number, rows: number): boolean {
+    return (
+      this.canvas.width !== cols * this.metrics.width * this.devicePixelRatio ||
+      this.canvas.height !== rows * this.metrics.height * this.devicePixelRatio
+    );
+  }
+
+  public resize(cols: number, rows: number): void {
+    const cssWidth = cols * this.metrics.width;
+    const cssHeight = rows * this.metrics.height;
+    this.canvas.style.width = `${cssWidth}px`;
+    this.canvas.style.height = `${cssHeight}px`;
+    this.canvas.width = cssWidth * this.devicePixelRatio;
+    this.canvas.height = cssHeight * this.devicePixelRatio;
+    this.resetContextCache();
+    this.ctx.scale(this.devicePixelRatio, this.devicePixelRatio);
+    this.ctx.textBaseline = 'alphabetic';
+    this.ctx.textAlign = 'left';
+    this.ctx.fillStyle = this.theme.background;
+    this.ctx.fillRect(0, 0, cssWidth, cssHeight);
+  }
+
   public clear(): void {
-    // clearRect first because fillRect composites rather than replaces,
-    // so transparent/translucent backgrounds wouldn't clear previous content.
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.ctx.fillStyle = this.theme.background;
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    this.resetContextCache();
+  }
+
+  protected fontChanged(): void {
+    this.fonts = [];
+    this.advances.clear();
+    this.currentFont = '';
+  }
+
+  protected finishFrame(overlay: FrameOverlay): void {
+    if (overlay.showCursor) this.renderCursor(overlay.cursorX, overlay.cursorY);
+    if (overlay.scrollbarOpacity > 0) this.renderScrollbar(overlay);
   }
 
   /**
-   * Cleanup resources
+   * Draws a row in two passes, backgrounds then text, so glyphs that extend
+   * past their cell are not covered by a neighbour's background. Backgrounds
+   * of one color are one rect; runs of plain ASCII in one style are one
+   * fillText, spaced to the cell grid with letterSpacing.
    */
-  public dispose(): void {
-    this.stopCursorBlink();
+  protected drawLine(line: GhosttyCell[], y: number, cols: number): void {
+    const ctx = this.ctx;
+    const cellW = this.metrics.width;
+    const cellH = this.metrics.height;
+    const lineY = y * cellH;
+
+    ctx.clearRect(0, lineY, cols * cellW, cellH);
+    this.setFill(this.theme.background);
+    ctx.fillRect(0, lineY, cols * cellW, cellH);
+
+    let runStart = 0;
+    let runEnd = 0;
+    let runColor: string | null = null;
+    for (let x = 0; x < line.length; x++) {
+      const cell = line[x];
+      if (cell.width === 0) continue;
+      const color = this.backgroundColor(cell, x, y);
+      if (color !== runColor) {
+        if (runColor) {
+          this.setFill(runColor);
+          ctx.fillRect(runStart * cellW, lineY, (runEnd - runStart) * cellW, cellH);
+        }
+        runColor = color;
+        runStart = x;
+      }
+      runEnd = x + cell.width;
+    }
+    if (runColor) {
+      this.setFill(runColor);
+      ctx.fillRect(runStart * cellW, lineY, (runEnd - runStart) * cellW, cellH);
+    }
+
+    let x = 0;
+    while (x < line.length) {
+      const cell = line[x];
+      if (cell.width === 0 || cell.flags & CellFlags.INVISIBLE) {
+        x++;
+        continue;
+      }
+      const color = this.foregroundColor(cell, this.isInSelection(x, y));
+      if (isBlank(cell)) {
+        this.renderDecorations(cell, x, y, color);
+        x++;
+        continue;
+      }
+      if (!this.batchText || !isPlainAscii(cell)) {
+        this.renderCellText(cell, x, y, color);
+        x++;
+        continue;
+      }
+      const style = cell.flags & TEXT_STYLE_FLAGS;
+      let text = String.fromCharCode(cell.codepoint);
+      let end = x + 1;
+      let lastGlyph = x;
+      this.renderDecorations(cell, x, y, color);
+      while (end < line.length) {
+        const next = line[end];
+        if (next.width !== 1 || next.flags & CellFlags.INVISIBLE) break;
+        const nextColor = this.foregroundColor(next, this.isInSelection(end, y));
+        if (isBlank(next)) {
+          this.renderDecorations(next, end, y, nextColor);
+          text += ' ';
+          end++;
+          continue;
+        }
+        if (!isPlainAscii(next)) break;
+        if ((next.flags & TEXT_STYLE_FLAGS) !== style || nextColor !== color) break;
+        this.renderDecorations(next, end, y, nextColor);
+        text += String.fromCharCode(next.codepoint);
+        lastGlyph = end;
+        end++;
+      }
+      this.drawText(text.slice(0, lastGlyph - x + 1), x, y, style, color);
+      x = end;
+    }
+  }
+
+  private backgroundColor(cell: GhosttyCell, x: number, y: number): string | null {
+    if (this.isInSelection(x, y)) return this.theme.selectionBackground;
+    const inverse = cell.flags & CellFlags.INVERSE;
+    const r = inverse ? cell.fg_r : cell.bg_r;
+    const g = inverse ? cell.fg_g : cell.bg_g;
+    const b = inverse ? cell.fg_b : cell.bg_b;
+    if (r === 0 && g === 0 && b === 0) return null;
+    return this.cssColor(r, g, b);
+  }
+
+  private foregroundColor(cell: GhosttyCell, selected: boolean): string {
+    if (selected) return this.theme.selectionForeground;
+    if (cell.flags & CellFlags.INVERSE) return this.cssColor(cell.bg_r, cell.bg_g, cell.bg_b);
+    return this.cssColor(cell.fg_r, cell.fg_g, cell.fg_b);
+  }
+
+  private cssColor(r: number, g: number, b: number): string {
+    const key = (r << 16) | (g << 8) | b;
+    let color = this.colorStrings.get(key);
+    if (color === undefined) {
+      color = `rgb(${r}, ${g}, ${b})`;
+      this.colorStrings.set(key, color);
+    }
+    return color;
+  }
+
+  private setFill(color: string): void {
+    if (this.currentFill !== color) {
+      this.ctx.fillStyle = color;
+      this.currentFill = color;
+    }
+  }
+
+  private setFont(style: number): void {
+    const font = this.fontFor(style);
+    if (this.currentFont !== font) {
+      this.ctx.font = font;
+      this.currentFont = font;
+      if (this.batchText) this.ctx.letterSpacing = `${this.metrics.width - this.advanceOf(font)}px`;
+    }
+  }
+
+  private fontFor(style: number): string {
+    let font = this.fonts[style];
+    if (font === undefined) {
+      let prefix = '';
+      if (style & CellFlags.ITALIC) prefix += 'italic ';
+      if (style & CellFlags.BOLD) prefix += 'bold ';
+      font = `${prefix}${this.fontSize}px ${this.fontFamily}`;
+      this.fonts[style] = font;
+    }
+    return font;
+  }
+
+  private advanceOf(font: string): number {
+    let advance = this.advances.get(font);
+    if (advance === undefined) {
+      const spacing = this.ctx.letterSpacing;
+      this.ctx.letterSpacing = '0px';
+      advance = this.ctx.measureText('M').width;
+      this.ctx.letterSpacing = spacing;
+      this.advances.set(font, advance);
+    }
+    return advance;
+  }
+
+  private resetContextCache(): void {
+    this.currentFill = '';
+    this.currentFont = '';
+  }
+
+  private drawText(text: string, x: number, y: number, style: number, color: string): void {
+    this.setFont(style);
+    this.setFill(color);
+    const faint = style & CellFlags.FAINT;
+    if (faint) this.ctx.globalAlpha = 0.5;
+    this.ctx.fillText(
+      text,
+      x * this.metrics.width,
+      y * this.metrics.height + this.metrics.baseline
+    );
+    if (faint) this.ctx.globalAlpha = 1.0;
+  }
+
+  /** One cell's glyph and decorations, for cells a run cannot hold and the glyph under a block cursor. */
+  private renderCellText(cell: GhosttyCell, x: number, y: number, color: string): void {
+    if (cell.flags & CellFlags.INVISIBLE) return;
+    if (cell.grapheme_len === 0 && isBoxGlyph(cell.codepoint)) {
+      this.setFill(color);
+      const faint = cell.flags & CellFlags.FAINT;
+      if (faint) this.ctx.globalAlpha = 0.5;
+      drawBoxGlyph(
+        this.ctx,
+        cell.codepoint,
+        x * this.metrics.width,
+        y * this.metrics.height,
+        this.metrics.width * cell.width,
+        this.metrics.height
+      );
+      if (faint) this.ctx.globalAlpha = 1.0;
+      this.resetContextCache();
+    } else {
+      const spacing = this.batchText ? this.ctx.letterSpacing : '';
+      if (this.batchText) this.ctx.letterSpacing = '0px';
+      this.drawText(this.cellText(cell, x, y), x, y, cell.flags & TEXT_STYLE_FLAGS, color);
+      if (this.batchText) this.ctx.letterSpacing = spacing;
+    }
+    this.renderDecorations(cell, x, y, color);
+  }
+
+  private renderDecorations(cell: GhosttyCell, x: number, y: number, color: string): void {
+    const underline = cell.flags & CellFlags.UNDERLINE;
+    const strike = cell.flags & CellFlags.STRIKETHROUGH;
+    const link = (cell.hyperlink_id > 0 || this.hoveredLinkRange) && this.linkHovered(cell, x, y);
+    if (!underline && !strike && !link) return;
+    const cellX = x * this.metrics.width;
+    const cellY = y * this.metrics.height;
+    const cellWidth = this.metrics.width * cell.width;
+    const underlineY = cellY + this.metrics.baseline + 2;
+    if (underline) this.strokeLine(cellX, underlineY, cellWidth, color);
+    if (strike) this.strokeLine(cellX, cellY + this.metrics.height / 2, cellWidth, color);
+    if (link) this.strokeLine(cellX, underlineY, cellWidth, LINK_COLOR);
+  }
+
+  private strokeLine(x: number, y: number, width: number, color: string): void {
+    const ctx = this.ctx;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + width, y);
+    ctx.stroke();
+  }
+
+  private renderCursor(x: number, y: number): void {
+    const cursorX = x * this.metrics.width;
+    const cursorY = y * this.metrics.height;
+    this.setFill(this.theme.cursor);
+    if (this.cursorStyle === 'block') {
+      this.ctx.fillRect(cursorX, cursorY, this.metrics.width, this.metrics.height);
+      const line = this.currentBuffer?.getLine(y);
+      if (line?.[x]) {
+        this.ctx.save();
+        this.ctx.beginPath();
+        this.ctx.rect(cursorX, cursorY, this.metrics.width, this.metrics.height);
+        this.ctx.clip();
+        this.renderCellText(line[x], x, y, this.theme.cursorAccent);
+        this.ctx.restore();
+        this.resetContextCache();
+      }
+    } else if (this.cursorStyle === 'underline') {
+      const height = Math.max(2, Math.floor(this.metrics.height * 0.15));
+      this.ctx.fillRect(
+        cursorX,
+        cursorY + this.metrics.height - height,
+        this.metrics.width,
+        height
+      );
+    } else {
+      const width = Math.max(2, Math.floor(this.metrics.width * 0.15));
+      this.ctx.fillRect(cursorX, cursorY, width, this.metrics.height);
+    }
+  }
+
+  private renderScrollbar(overlay: FrameOverlay): void {
+    const ctx = this.ctx;
+    const canvasHeight = this.canvas.height / this.devicePixelRatio;
+    const canvasWidth = this.canvas.width / this.devicePixelRatio;
+    const scrollbarX = canvasWidth - 8 - 4;
+    ctx.clearRect(scrollbarX - 2, 0, 8 + 6, canvasHeight);
+    ctx.fillStyle = this.theme.background;
+    ctx.fillRect(scrollbarX - 2, 0, 8 + 6, canvasHeight);
+    this.resetContextCache();
+    const thumb = this.scrollbarThumb(overlay);
+    if (!thumb) return;
+    const opacity = overlay.scrollbarOpacity;
+    ctx.fillStyle = `rgba(128, 128, 128, ${0.1 * opacity})`;
+    ctx.fillRect(scrollbarX, thumb.trackY, thumb.width, thumb.trackHeight);
+    const baseOpacity = overlay.viewportY > 0 ? 0.5 : 0.3;
+    ctx.fillStyle = `rgba(128, 128, 128, ${baseOpacity * opacity})`;
+    ctx.fillRect(scrollbarX, thumb.thumbY, thumb.width, thumb.thumbHeight);
+    this.resetContextCache();
   }
 }

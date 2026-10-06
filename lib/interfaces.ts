@@ -14,6 +14,12 @@ export interface ITerminalOptions {
   fontSize?: number; // Default: 15
   fontFamily?: string; // Default: 'monospace'
   allowTransparency?: boolean;
+  /**
+   * How the terminal draws, read when it opens. 'webgl' draws on the GPU and
+   * falls back to 'canvas' when WebGL 2 is unavailable or its context is lost.
+   * Default: 'webgl'.
+   */
+  renderer?: 'webgl' | 'canvas';
 
   // Phase 1 additions
   convertEol?: boolean; // Convert \n to \r\n (default: false)

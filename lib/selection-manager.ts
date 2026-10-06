@@ -13,7 +13,7 @@
 import { EventEmitter } from './event-emitter';
 import type { GhosttyTerminal } from './ghostty';
 import type { IEvent } from './interfaces';
-import type { CanvasRenderer } from './renderer';
+import type { TerminalRenderer } from './renderer';
 import type { Terminal } from './terminal';
 import type { GhosttyCell } from './types';
 
@@ -34,7 +34,7 @@ export interface SelectionCoordinates {
 
 export class SelectionManager {
   private terminal: Terminal;
-  private renderer: CanvasRenderer;
+  private renderer: TerminalRenderer;
   private wasmTerm: GhosttyTerminal;
   private textarea: HTMLTextAreaElement;
 
@@ -101,7 +101,7 @@ export class SelectionManager {
 
   constructor(
     terminal: Terminal,
-    renderer: CanvasRenderer,
+    renderer: TerminalRenderer,
     wasmTerm: GhosttyTerminal,
     textarea: HTMLTextAreaElement
   ) {
@@ -112,6 +112,11 @@ export class SelectionManager {
 
     // Attach mouse event listeners
     this.attachEventListeners();
+  }
+
+  /** Points the selection at a new renderer drawing the same canvas. */
+  setRenderer(renderer: TerminalRenderer): void {
+    this.renderer = renderer;
   }
 
   // ==========================================================================

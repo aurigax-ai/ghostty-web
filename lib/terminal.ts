@@ -44,9 +44,10 @@ import { LinkDetector } from './link-detector';
 import { type IMarker, Marker } from './marker';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
-import { CanvasRenderer } from './renderer';
+import { CanvasRenderer, type RendererOptions, type TerminalRenderer } from './renderer';
 import { SelectionManager } from './selection-manager';
 import type { ILink, ILinkProvider } from './types';
+import { WebglRenderer } from './webgl-renderer';
 
 // ============================================================================
 // Terminal Class
@@ -75,7 +76,7 @@ export class Terminal implements ITerminalCore {
   // Components (created on open())
   private ghostty?: Ghostty;
   public wasmTerm?: GhosttyTerminal; // Made public for link providers
-  public renderer?: CanvasRenderer; // Made public for FitAddon
+  public renderer?: TerminalRenderer; // Made public for FitAddon
   private inputHandler?: InputHandler;
   private selectionManager?: SelectionManager;
   private canvas?: HTMLCanvasElement;
@@ -187,6 +188,7 @@ export class Terminal implements ITerminalCore {
       fontSize: options.fontSize ?? 15,
       fontFamily: options.fontFamily ?? 'monospace',
       allowTransparency: options.allowTransparency ?? false,
+      renderer: options.renderer ?? 'webgl',
       convertEol: options.convertEol ?? false,
       disableStdin: options.disableStdin ?? false,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
@@ -282,13 +284,6 @@ export class Terminal implements ITerminalCore {
 
     // Resize canvas to match new font metrics
     this.renderer.resize(this.cols, this.rows);
-
-    // Update canvas element dimensions to match renderer
-    const metrics = this.renderer.getMetrics();
-    this.canvas.width = metrics.width * this.cols;
-    this.canvas.height = metrics.height * this.rows;
-    this.canvas.style.width = `${metrics.width * this.cols}px`;
-    this.canvas.style.height = `${metrics.height * this.rows}px`;
 
     // Force full re-render with new font
     this.renderer.render(this.wasmTerm, true, this.viewportY, this);
@@ -457,29 +452,18 @@ export class Terminal implements ITerminalCore {
         textarea.focus();
       });
 
-      // Create renderer
-      this.renderer = new CanvasRenderer(this.canvas, {
-        fontSize: this.options.fontSize,
-        fontFamily: this.options.fontFamily,
-        cursorStyle: this.options.cursorStyle,
-        cursorBlink: this.options.cursorBlink,
-        theme: this.options.theme,
-      });
-      this.renderer.onNeedsFrame = () => this.wake();
-
-      // Size canvas to terminal dimensions (use renderer.resize for proper DPI scaling)
+      this.renderer = this.createRenderer();
       this.renderer.resize(this.cols, this.rows);
 
       // Create mouse tracking configuration
       const canvas = this.canvas;
-      const renderer = this.renderer;
       const wasmTerm = this.wasmTerm;
       const mouseConfig: MouseTrackingConfig = {
         hasMouseTracking: () => wasmTerm?.hasMouseTracking() ?? false,
         hasSgrMouseMode: () => wasmTerm?.getMode(1006, false) ?? true, // SGR extended mode
         getCellDimensions: () => ({
-          width: renderer.charWidth,
-          height: renderer.charHeight,
+          width: this.renderer!.charWidth,
+          height: this.renderer!.charHeight,
         }),
         getCanvasOffset: () => {
           const rect = canvas.getBoundingClientRect();
@@ -576,6 +560,57 @@ export class Terminal implements ITerminalCore {
       this.cleanupComponents();
       throw new Error(`Failed to open terminal: ${error}`);
     }
+  }
+
+  /** Which renderer draws the terminal now: 'webgl', or 'canvas' when asked for or fallen back to. */
+  get rendererType(): 'webgl' | 'canvas' {
+    return this.renderer instanceof WebglRenderer ? 'webgl' : 'canvas';
+  }
+
+  private rendererOptions(): RendererOptions {
+    return {
+      fontSize: this.options.fontSize,
+      fontFamily: this.options.fontFamily,
+      cursorStyle: this.options.cursorStyle,
+      cursorBlink: this.options.cursorBlink,
+      theme: this.options.theme,
+    };
+  }
+
+  private createRenderer(): TerminalRenderer {
+    let renderer: TerminalRenderer | null = null;
+    if (this.options.renderer === 'webgl') {
+      try {
+        const webgl = new WebglRenderer(this.canvas!, this.rendererOptions());
+        webgl.onContextLost = () => this.fallBackToCanvas();
+        renderer = webgl;
+      } catch {
+        renderer = null;
+      }
+    }
+    renderer ??= new CanvasRenderer(this.canvas!, this.rendererOptions());
+    renderer.onNeedsFrame = () => this.wake();
+    return renderer;
+  }
+
+  /** Replaces a WebGL renderer whose context was lost with a canvas renderer on the same canvas. */
+  private fallBackToCanvas(): void {
+    if (!this.renderer || !this.canvas || !(this.renderer instanceof WebglRenderer)) return;
+    const hoveredLink = this.renderer.getHoveredHyperlinkId();
+    this.renderer.dispose();
+    const renderer = new CanvasRenderer(this.canvas, this.rendererOptions());
+    renderer.onNeedsFrame = () => this.wake();
+    renderer.setHoveredHyperlinkId(hoveredLink);
+    if (this.selectionManager) {
+      renderer.setSelectionManager(this.selectionManager);
+      this.selectionManager.setRenderer(renderer);
+    }
+    this.renderer = renderer;
+    renderer.resize(this.cols, this.rows);
+    if (this.wasmTerm) {
+      renderer.render(this.wasmTerm, true, this.viewportY, this, this.scrollbarOpacity);
+    }
+    this.wake();
   }
 
   /**
@@ -722,13 +757,6 @@ export class Terminal implements ITerminalCore {
 
       // Resize renderer
       this.renderer!.resize(cols, rows);
-
-      // Update canvas dimensions
-      const metrics = this.renderer!.getMetrics();
-      this.canvas!.width = metrics.width * cols;
-      this.canvas!.height = metrics.height * rows;
-      this.canvas!.style.width = `${metrics.width * cols}px`;
-      this.canvas!.style.height = `${metrics.height * rows}px`;
 
       // Fire resize event
       this.resizeEmitter.fire({ cols, rows });
