@@ -156,7 +156,6 @@ export class Terminal implements ITerminalCore {
   public viewportY: number = 0; // Top line of viewport in scrollback buffer (0 = at bottom, can be fractional during smooth scroll)
   private targetViewportY: number = 0; // Target viewport position for smooth scrolling
   private scrollAnimationStartTime?: number;
-  private scrollAnimationStartY?: number;
   private scrollAnimationFrame?: number;
   private customWheelEventHandler?: (event: WheelEvent) => boolean;
   private lastCursorY: number = 0; // Track cursor position for onCursorMove
@@ -1068,7 +1067,6 @@ export class Terminal implements ITerminalCore {
 
     // Start new animation
     this.scrollAnimationStartTime = Date.now();
-    this.scrollAnimationStartY = this.viewportY;
     this.animateScroll();
   }
 
@@ -1101,7 +1099,6 @@ export class Terminal implements ITerminalCore {
       // Animation complete
       this.scrollAnimationFrame = undefined;
       this.scrollAnimationStartTime = undefined;
-      this.scrollAnimationStartY = undefined;
       return;
     }
 
@@ -1112,8 +1109,7 @@ export class Terminal implements ITerminalCore {
     const moveRatio = 1 - (1 / framesForDuration) ** 2; // Ease-out
     this.viewportY += distance * moveRatio;
 
-    // Fire scroll event (use floor to convert fractional to integer for API)
-    const intViewportY = Math.floor(this.viewportY);
+    // Fire scroll event
     this.fireScroll();
 
     // Show scrollbar during animation

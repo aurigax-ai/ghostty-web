@@ -571,7 +571,7 @@ export class SelectionManager {
 
     // CRITICAL FIX: Listen for mouseup on DOCUMENT, not just canvas
     // This catches mouseup events that happen outside the canvas (common during drag)
-    this.boundMouseUpHandler = (e: MouseEvent) => {
+    this.boundMouseUpHandler = () => {
       if (this.isSelecting) {
         this.isSelecting = false;
         this.stopAutoScroll();
@@ -662,9 +662,6 @@ export class SelectionManager {
     // This allows Copy/Paste options to appear in the context menu
     this.boundContextMenuHandler = (e: MouseEvent) => {
       // Position textarea at mouse cursor
-      const canvas = this.renderer.getCanvas();
-      const rect = canvas.getBoundingClientRect();
-
       this.textarea.style.position = 'fixed';
       this.textarea.style.left = `${e.clientX}px`;
       this.textarea.style.top = `${e.clientY}px`;

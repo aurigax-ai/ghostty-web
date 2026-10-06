@@ -18,14 +18,7 @@
 import { EventEmitter } from './event-emitter';
 import type { GhosttyTerminal } from './ghostty';
 import { CellFlags } from './ghostty';
-import type {
-  IBuffer,
-  IBufferCell,
-  IBufferLine,
-  IBufferNamespace,
-  IDisposable,
-  IEvent,
-} from './interfaces';
+import type { IBuffer, IBufferCell, IBufferLine, IBufferNamespace, IEvent } from './interfaces';
 import type { Terminal } from './terminal';
 import type { GhosttyCell } from './types';
 
@@ -298,11 +291,9 @@ export class BufferLine implements IBufferLine {
  */
 export class BufferCell implements IBufferCell {
   private cell: GhosttyCell;
-  private x: number;
 
-  constructor(cell: GhosttyCell, x: number) {
+  constructor(cell: GhosttyCell, _x: number) {
     this.cell = cell;
-    this.x = x;
   }
 
   getChars(): string {
