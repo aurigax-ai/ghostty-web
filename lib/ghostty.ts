@@ -6,7 +6,7 @@
  * grid references and key encoder through `Abi`.
  */
 
-import { Abi, GHOSTTY_SUCCESS, type VtExports } from './abi';
+import { Abi, GHOSTTY_SUCCESS, GhosttyCallError, type VtExports } from './abi';
 import { EventEmitter } from './event-emitter';
 import type { IEvent } from './interfaces';
 import {
@@ -232,8 +232,136 @@ function rgbAt(view: DataView, ptr: number): RGB {
   return { r: view.getUint8(ptr), g: view.getUint8(ptr + 1), b: view.getUint8(ptr + 2) };
 }
 
-function bitsOf(raw: bigint, field: { lsb: number; width: number }): number {
-  return Number((raw >> BigInt(field.lsb)) & ((1n << BigInt(field.width)) - 1n));
+interface CellLayout {
+  styleSize: number;
+  fgColor: number;
+  bgColor: number;
+  bold: number;
+  italic: number;
+  faint: number;
+  blink: number;
+  inverse: number;
+  invisible: number;
+  strikethrough: number;
+  underline: number;
+  colorTag: number;
+  colorValue: number;
+  colorPalette: number;
+  colorRgb: number;
+  tagCodepoint: number;
+  tagGrapheme: number;
+  tagBgPalette: number;
+  tagBgRgb: number;
+  wideWide: number;
+  wideSpacerTail: number;
+  rowIteratorData: number;
+  rowDirtyData: number;
+  rowCellsData: number;
+  rowIteratorNext: (iterator: number) => number;
+  rowGet: (iterator: number, key: number, out: number) => number;
+  rowCellsNext: (cells: number) => number;
+  rowCellsGetMulti: (
+    cells: number,
+    count: number,
+    keys: number,
+    values: number,
+    written: number
+  ) => number;
+}
+
+const EXPECTED_CELL_BITS: Record<string, [number, number]> = {
+  content_tag: [0, 2],
+  content: [2, 24],
+  style_id: [26, 16],
+  wide: [42, 2],
+  hyperlink: [45, 1],
+};
+
+const cellLayouts = new WeakMap<Abi, CellLayout>();
+
+function cellLayout(abi: Abi): CellLayout {
+  const cached = cellLayouts.get(abi);
+  if (cached) return cached;
+  for (const [field, [lsb, width]] of Object.entries(EXPECTED_CELL_BITS)) {
+    const bits = abi.bits('GhosttyCell', field);
+    if (bits.lsb !== lsb || bits.width !== width) {
+      throw new Error(`libghostty-vt GhosttyCell.${field} moved to ${bits.lsb}+${bits.width}`);
+    }
+  }
+  const style = (f: string) => abi.offset('GhosttyStyle', f);
+  const tags = 'GhosttyCellContentTag';
+  const fn = <T>(name: string) => abi.fn(name) as unknown as T;
+  const layout: CellLayout = {
+    styleSize: abi.sizeOf('GhosttyStyle'),
+    fgColor: style('fg_color'),
+    bgColor: style('bg_color'),
+    bold: style('bold'),
+    italic: style('italic'),
+    faint: style('faint'),
+    blink: style('blink'),
+    inverse: style('inverse'),
+    invisible: style('invisible'),
+    strikethrough: style('strikethrough'),
+    underline: style('underline'),
+    colorTag: abi.offset('GhosttyStyleColor', 'tag'),
+    colorValue: abi.offset('GhosttyStyleColor', 'value'),
+    colorPalette: abi.enumValue('GhosttyStyleColorTag', 'PALETTE'),
+    colorRgb: abi.enumValue('GhosttyStyleColorTag', 'RGB'),
+    tagCodepoint: abi.enumValue(tags, 'CODEPOINT'),
+    tagGrapheme: abi.enumValue(tags, 'CODEPOINT_GRAPHEME'),
+    tagBgPalette: abi.enumValue(tags, 'BG_COLOR_PALETTE'),
+    tagBgRgb: abi.enumValue(tags, 'BG_COLOR_RGB'),
+    wideWide: abi.enumValue('GhosttyCellWide', 'WIDE'),
+    wideSpacerTail: abi.enumValue('GhosttyCellWide', 'SPACER_TAIL'),
+    rowIteratorData: abi.enumValue('GhosttyRenderStateData', 'ROW_ITERATOR'),
+    rowDirtyData: abi.enumValue('GhosttyRenderStateRowData', 'DIRTY'),
+    rowCellsData: abi.enumValue('GhosttyRenderStateRowData', 'CELLS'),
+    rowIteratorNext: fn('ghostty_render_state_row_iterator_next'),
+    rowGet: fn('ghostty_render_state_row_get'),
+    rowCellsNext: fn('ghostty_render_state_row_cells_next'),
+    rowCellsGetMulti: fn('ghostty_render_state_row_cells_get_multi'),
+  };
+  cellLayouts.set(abi, layout);
+  return layout;
+}
+
+interface ExtractScratch {
+  base: number;
+  size: number;
+  slot: number;
+  flag: number;
+  keys: number;
+  values: number;
+  raw: number;
+  len: number;
+  style: number;
+  written: number;
+}
+
+function allocScratch(abi: Abi, layout: CellLayout): ExtractScratch {
+  const size = 8 + 8 + 12 + 12 + 8 + 8 + layout.styleSize + 8;
+  const base = abi.alloc(size);
+  const scratch: ExtractScratch = {
+    base,
+    size,
+    slot: base,
+    flag: base + 8,
+    keys: base + 16,
+    values: base + 28,
+    raw: base + 40,
+    len: base + 48,
+    style: base + 56,
+    written: base + 56 + layout.styleSize,
+  };
+  const view = abi.view();
+  const cells = 'GhosttyRenderStateRowCellsData';
+  view.setInt32(scratch.keys, abi.enumValue(cells, 'RAW'), true);
+  view.setInt32(scratch.keys + 4, abi.enumValue(cells, 'GRAPHEMES_LEN'), true);
+  view.setInt32(scratch.keys + 8, abi.enumValue(cells, 'STYLE'), true);
+  view.setUint32(scratch.values, scratch.raw, true);
+  view.setUint32(scratch.values + 4, scratch.len, true);
+  view.setUint32(scratch.values + 8, scratch.style, true);
+  return scratch;
 }
 
 /**
@@ -252,6 +380,8 @@ export class GhosttyTerminal {
   private _cols: number;
   private _rows: number;
 
+  private readonly layout: CellLayout;
+  private readonly scratch: ExtractScratch;
   private cellPool: GhosttyCell[] = [];
   private rowDirty: boolean[] = [];
   private dirty: DirtyState = DirtyState.FULL;
@@ -298,6 +428,8 @@ export class GhosttyTerminal {
   ) {
     this._cols = cols;
     this._rows = rows;
+    this.layout = cellLayout(abi);
+    this.scratch = allocScratch(abi, this.layout);
     this.handle = abi.newHandle('ghostty_terminal_new', (slot) =>
       abi.call('ghostty_terminal_new', 0, slot, cols, rows)
     );
@@ -366,6 +498,7 @@ export class GhosttyTerminal {
     abi.call('ghostty_render_state_row_cells_free', this.rowCells);
     abi.call('ghostty_render_state_row_iterator_free', this.rowIterator);
     abi.call('ghostty_render_state_free', this.renderState);
+    abi.free(this.scratch.base, this.scratch.size);
     abi.call('ghostty_terminal_free', this.handle);
     for (const index of this.callbacks) abi.removeCallback(index);
     this.callbacks = [];
@@ -899,113 +1032,116 @@ export class GhosttyTerminal {
 
   private extractRows(all: boolean): void {
     const abi = this.abi;
-    const rowData = 'GhosttyRenderStateRowData';
-    abi.with(8, (slot) => {
-      const view = abi.view();
-      view.setUint32(slot, this.rowIterator, true);
-      abi.check(
-        'ghostty_render_state_get',
-        this.renderState,
-        abi.enumValue('GhosttyRenderStateData', 'ROW_ITERATOR'),
-        slot
-      );
-      abi.view().setUint32(slot, this.rowCells, true);
-      let y = 0;
-      while (
-        y < this._rows &&
-        abi.call('ghostty_render_state_row_iterator_next', this.rowIterator)
-      ) {
-        const rowDirty = abi.with(4, (out) => {
-          abi.check(
-            'ghostty_render_state_row_get',
-            this.rowIterator,
-            abi.enumValue(rowData, 'DIRTY'),
-            out
-          );
-          return abi.view().getUint8(out) !== 0;
-        });
-        if (all || rowDirty) {
-          this.rowDirty[y] = true;
-          abi.check(
-            'ghostty_render_state_row_get',
-            this.rowIterator,
-            abi.enumValue(rowData, 'CELLS'),
-            slot
-          );
-          this.extractCells(y);
-        }
-        y++;
+    const layout = this.layout;
+    const rowGet = layout.rowGet;
+    const iteratorNext = layout.rowIteratorNext;
+    const scratch = this.scratch;
+    const view = abi.view();
+    view.setUint32(scratch.slot, this.rowIterator, true);
+    abi.check('ghostty_render_state_get', this.renderState, layout.rowIteratorData, scratch.slot);
+    let y = 0;
+    while (y < this._rows && iteratorNext(this.rowIterator)) {
+      const v = abi.view();
+      v.setUint32(scratch.slot, this.rowCells, true);
+      let rowDirty = all;
+      if (!rowDirty) {
+        rowGet(this.rowIterator, layout.rowDirtyData, scratch.flag);
+        rowDirty = abi.view().getUint8(scratch.flag) !== 0;
       }
-    });
+      if (rowDirty) {
+        this.rowDirty[y] = true;
+        const result = rowGet(this.rowIterator, layout.rowCellsData, scratch.slot);
+        if (result !== GHOSTTY_SUCCESS)
+          throw new GhosttyCallError('ghostty_render_state_row_get', result);
+        this.extractCells(y);
+      }
+      y++;
+    }
   }
 
   private extractCells(y: number): void {
     const abi = this.abi;
-    const cellsData = 'GhosttyRenderStateRowCellsData';
-    const styleSize = abi.sizeOf('GhosttyStyle');
-    const keyRaw = abi.enumValue(cellsData, 'RAW');
-    const keyLen = abi.enumValue(cellsData, 'GRAPHEMES_LEN');
-    const keyStyle = abi.enumValue(cellsData, 'STYLE');
-    const block = 3 * 4 + 3 * 4 + 8 + 8 + styleSize + 8;
-    abi.with(block, (base) => {
-      const keys = base;
-      const values = base + 12;
-      const raw = base + 24;
-      const len = base + 32;
-      const style = base + 40;
-      const written = style + styleSize;
-      const view = abi.view();
-      view.setInt32(keys, keyRaw, true);
-      view.setInt32(keys + 4, keyLen, true);
-      view.setInt32(keys + 8, keyStyle, true);
-      view.setUint32(values, raw, true);
-      view.setUint32(values + 4, len, true);
-      view.setUint32(values + 8, style, true);
-      let x = 0;
-      let hyperlinkRun = 0;
-      let previousLinked = false;
-      while (x < this._cols && abi.call('ghostty_render_state_row_cells_next', this.rowCells)) {
-        abi.view().setUint32(style, styleSize, true);
-        abi.check(
-          'ghostty_render_state_row_cells_get_multi',
-          this.rowCells,
-          3,
-          keys,
-          values,
-          written
-        );
-        const v = abi.view();
-        const cell = this.cellPool[y * this._cols + x];
-        const graphemeLen = v.getUint32(len, true);
-        this.fillCell(cell, v.getBigUint64(raw, true), style, graphemeLen);
-        if (cell.hyperlink_id) {
-          if (!previousLinked) hyperlinkRun++;
-          cell.hyperlink_id = hyperlinkRun;
-        }
-        previousLinked = cell.hyperlink_id !== 0;
-        x++;
+    const layout = this.layout;
+    const scratch = this.scratch;
+    const cellsNext = layout.rowCellsNext;
+    const getMulti = layout.rowCellsGetMulti;
+    const pool = this.cellPool;
+    const cols = this._cols;
+    const rowStart = y * cols;
+    let view = abi.view();
+    let x = 0;
+    let hyperlinkRun = 0;
+    let previousLinked = false;
+    while (x < cols && cellsNext(this.rowCells)) {
+      if (view.buffer !== abi.exports.memory.buffer) view = abi.view();
+      view.setUint32(scratch.style, layout.styleSize, true);
+      const result = getMulti(this.rowCells, 3, scratch.keys, scratch.values, scratch.written);
+      if (result !== GHOSTTY_SUCCESS) {
+        throw new GhosttyCallError('ghostty_render_state_row_cells_get_multi', result);
       }
-    });
+      if (view.buffer !== abi.exports.memory.buffer) view = abi.view();
+      const cell = pool[rowStart + x];
+      this.fillCellFrom(
+        cell,
+        view,
+        view.getUint32(scratch.raw, true),
+        view.getUint32(scratch.raw + 4, true),
+        scratch.style,
+        view.getUint32(scratch.len, true)
+      );
+      if (cell.hyperlink_id) {
+        if (!previousLinked) hyperlinkRun++;
+        cell.hyperlink_id = hyperlinkRun;
+      }
+      previousLinked = cell.hyperlink_id !== 0;
+      x++;
+    }
   }
 
   private fillCell(cell: GhosttyCell, raw: bigint, stylePtr: number, graphemeLen: number): void {
-    const abi = this.abi;
-    const view = abi.view();
-    const tag = bitsOf(raw, abi.bits('GhosttyCell', 'content_tag'));
-    const content = abi.bits('GhosttyCell', 'content');
-    const contentBits = bitsOf(raw, content);
-    const tags = 'GhosttyCellContentTag';
-    const isText =
-      tag === abi.enumValue(tags, 'CODEPOINT') || tag === abi.enumValue(tags, 'CODEPOINT_GRAPHEME');
-    cell.codepoint = isText ? contentBits & 0x1fffff : 0;
-    cell.grapheme_len = Math.max(0, graphemeLen - 1);
+    this.fillCellFrom(
+      cell,
+      this.abi.view(),
+      Number(raw & 0xffffffffn),
+      Number(raw >> 32n),
+      stylePtr,
+      graphemeLen
+    );
+  }
 
-    const at = (f: string) => stylePtr + abi.offset('GhosttyStyle', f);
-    const fg = this.styleColor(view, at('fg_color')) ?? this.colors.foreground;
-    let bg = this.styleColor(view, at('bg_color')) ?? this.colors.background;
-    if (tag === abi.enumValue(tags, 'BG_COLOR_PALETTE')) {
+  private fillCellFrom(
+    cell: GhosttyCell,
+    view: DataView,
+    lo: number,
+    hi: number,
+    stylePtr: number,
+    graphemeLen: number
+  ): void {
+    const L = this.layout;
+    const tag = lo & 0x3;
+    const contentBits = (lo >>> 2) & 0xffffff;
+    cell.codepoint = tag === L.tagCodepoint || tag === L.tagGrapheme ? contentBits & 0x1fffff : 0;
+    cell.grapheme_len = graphemeLen > 1 ? graphemeLen - 1 : 0;
+
+    const styleId = ((lo >>> 26) | (hi << 6)) & 0xffff;
+    let fg = this.colors.foreground;
+    let bg = this.colors.background;
+    let flags = 0;
+    if (styleId !== 0) {
+      fg = this.styleColor(view, stylePtr + L.fgColor) ?? fg;
+      bg = this.styleColor(view, stylePtr + L.bgColor) ?? bg;
+      if (view.getUint8(stylePtr + L.bold)) flags |= CellFlags.BOLD;
+      if (view.getUint8(stylePtr + L.italic)) flags |= CellFlags.ITALIC;
+      if (view.getInt32(stylePtr + L.underline, true) !== 0) flags |= CellFlags.UNDERLINE;
+      if (view.getUint8(stylePtr + L.strikethrough)) flags |= CellFlags.STRIKETHROUGH;
+      if (view.getUint8(stylePtr + L.inverse)) flags |= CellFlags.INVERSE;
+      if (view.getUint8(stylePtr + L.invisible)) flags |= CellFlags.INVISIBLE;
+      if (view.getUint8(stylePtr + L.blink)) flags |= CellFlags.BLINK;
+      if (view.getUint8(stylePtr + L.faint)) flags |= CellFlags.FAINT;
+    }
+    if (tag === L.tagBgPalette) {
       bg = this.colors.palette[contentBits & 0xff] ?? bg;
-    } else if (tag === abi.enumValue(tags, 'BG_COLOR_RGB')) {
+    } else if (tag === L.tagBgRgb) {
       bg = { r: contentBits & 0xff, g: (contentBits >> 8) & 0xff, b: (contentBits >> 16) & 0xff };
     }
     cell.fg_r = fg.r;
@@ -1014,37 +1150,19 @@ export class GhosttyTerminal {
     cell.bg_r = bg.r;
     cell.bg_g = bg.g;
     cell.bg_b = bg.b;
-
-    let flags = 0;
-    if (view.getUint8(at('bold'))) flags |= CellFlags.BOLD;
-    if (view.getUint8(at('italic'))) flags |= CellFlags.ITALIC;
-    if (view.getInt32(at('underline'), true) !== 0) flags |= CellFlags.UNDERLINE;
-    if (view.getUint8(at('strikethrough'))) flags |= CellFlags.STRIKETHROUGH;
-    if (view.getUint8(at('inverse'))) flags |= CellFlags.INVERSE;
-    if (view.getUint8(at('invisible'))) flags |= CellFlags.INVISIBLE;
-    if (view.getUint8(at('blink'))) flags |= CellFlags.BLINK;
-    if (view.getUint8(at('faint'))) flags |= CellFlags.FAINT;
     cell.flags = flags;
 
-    const wide = bitsOf(raw, abi.bits('GhosttyCell', 'wide'));
-    const wides = 'GhosttyCellWide';
-    cell.width =
-      wide === abi.enumValue(wides, 'WIDE')
-        ? 2
-        : wide === abi.enumValue(wides, 'SPACER_TAIL')
-          ? 0
-          : 1;
-    cell.hyperlink_id = bitsOf(raw, abi.bits('GhosttyCell', 'hyperlink'));
+    const wide = (hi >>> 10) & 0x3;
+    cell.width = wide === L.wideWide ? 2 : wide === L.wideSpacerTail ? 0 : 1;
+    cell.hyperlink_id = (hi >>> 13) & 0x1;
   }
 
   private styleColor(view: DataView, ptr: number): RGB | null {
-    const abi = this.abi;
-    const tag = view.getInt32(ptr + abi.offset('GhosttyStyleColor', 'tag'), true);
-    const value = ptr + abi.offset('GhosttyStyleColor', 'value');
-    if (tag === abi.enumValue('GhosttyStyleColorTag', 'PALETTE')) {
-      return this.colors.palette[view.getUint8(value)] ?? null;
-    }
-    if (tag === abi.enumValue('GhosttyStyleColorTag', 'RGB')) return rgbAt(view, value);
+    const L = this.layout;
+    const tag = view.getInt32(ptr + L.colorTag, true);
+    if (tag === L.colorPalette)
+      return this.colors.palette[view.getUint8(ptr + L.colorValue)] ?? null;
+    if (tag === L.colorRgb) return rgbAt(view, ptr + L.colorValue);
     return null;
   }
 
