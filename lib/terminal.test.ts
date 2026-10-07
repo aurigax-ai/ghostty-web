@@ -9,7 +9,7 @@
  * Uses createIsolatedTerminal() to ensure each test gets its own WASM instance.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
 
@@ -2438,6 +2438,7 @@ describe('Options Proxy handleOptionChange', () => {
 
     const term = await createIsolatedTerminal({ cursorBlink: false });
     term.open(container);
+    term.focus();
 
     // Verify initial state
     expect(term.options.cursorBlink).toBe(false);
@@ -3199,5 +3200,62 @@ describe('Synchronous open()', () => {
     expect(term.rows).toBe(40);
 
     term.dispose();
+  });
+});
+
+describe('host-owned behavior, as in xterm.js', () => {
+  let container: HTMLElement;
+  let term: Terminal | null = null;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    term?.dispose();
+    term = null;
+    container.remove();
+  });
+
+  test('open() leaves focus where it was', async () => {
+    const other = document.createElement('input');
+    document.body.appendChild(other);
+    other.focus();
+    term = await createIsolatedTerminal({ cols: 40, rows: 10 });
+    term.open(container);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(document.activeElement).toBe(other);
+    other.remove();
+  });
+
+  test('a double-click selects a word without touching the clipboard', async () => {
+    term = await createIsolatedTerminal({ cols: 40, rows: 10 });
+    term.open(container);
+    term.write('hello world');
+    // @ts-ignore - accessing private for test
+    const copy = vi.spyOn(term.selectionManager, 'copyToClipboard');
+    const changed = vi.fn();
+    term.onSelectionChange(changed);
+    const canvas = container.querySelector('canvas')!;
+    const click = new MouseEvent('click', { detail: 2, bubbles: true });
+    Object.defineProperties(click, { offsetX: { value: 1 }, offsetY: { value: 1 } });
+    canvas.dispatchEvent(click);
+    expect(term.getSelection()).toBe('hello');
+    expect(changed).toHaveBeenCalled();
+    expect(copy).not.toHaveBeenCalled();
+  });
+
+  test('a write callback runs once the data is parsed, without waiting for a frame', async () => {
+    term = await createIsolatedTerminal({ cols: 40, rows: 10 });
+    term.open(container);
+    const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 0);
+    let done = false;
+    term.write('abc', () => {
+      done = true;
+    });
+    await Promise.resolve();
+    expect(done).toBe(true);
+    raf.mockRestore();
   });
 });

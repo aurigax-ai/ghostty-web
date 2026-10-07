@@ -582,9 +582,6 @@ export class Terminal implements ITerminalCore {
 
       // Start render loop
       this.startRenderLoop();
-
-      // Focus input (auto-focus so user can start typing immediately)
-      this.focus();
     } catch (error) {
       // Clean up on error
       this.isOpen = false;
@@ -702,8 +699,9 @@ export class Terminal implements ITerminalCore {
 
     // Call callback if provided
     if (callback) {
-      // Queue callback after next render
-      requestAnimationFrame(callback);
+      // The data is parsed by now, so run the callback as soon as this task
+      // ends, as xterm.js does once a write is processed.
+      queueMicrotask(callback);
     }
 
     if (this.awaitingEcho) {
@@ -857,16 +855,7 @@ export class Terminal implements ITerminalCore {
    */
   focus(): void {
     this.wake();
-    if (this.isOpen && this.element) {
-      // Focus immediately for immediate keyboard/wheel event handling
-      this.element.focus();
-
-      // Also schedule a delayed focus as backup to ensure it sticks
-      // (some browsers may need this if DOM isn't fully settled)
-      setTimeout(() => {
-        this.element?.focus();
-      }, 0);
-    }
+    if (this.isOpen && this.element) this.element.focus();
   }
 
   /**

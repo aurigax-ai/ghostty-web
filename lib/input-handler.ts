@@ -409,8 +409,9 @@ export class InputHandler {
       }
     }
 
-    // Allow Ctrl+V and Cmd+V to trigger paste event (don't preventDefault)
-    if ((event.ctrlKey || event.metaKey) && event.code === 'KeyV') {
+    // Cmd+V pastes through the browser's paste event; Ctrl+V reaches the
+    // program as ^V, as in xterm.js.
+    if (event.metaKey && event.code === 'KeyV') {
       // Let the browser's native paste event fire
       return;
     }
