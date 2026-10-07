@@ -16,7 +16,8 @@ kept with its history. It does not track upstream. What changed:
   its host (OSC 7), notifications, clipboard writes and unknown sequences, and keep markers as
   tracked grid references.
 - **WebGL renderer.** `renderer: 'webgl'` (the default) draws with WebGL 2 from a glyph atlas,
-  rewriting only the rows that changed; without WebGL 2, or when its context is lost, the terminal
+  rewriting only the rows that changed and drawing only the cells and glyph pixels that show
+  something; without WebGL 2, or when its context is lost, the terminal
   draws with the canvas renderer instead (`renderer: 'canvas'` asks for it). Both draw box drawing
   and block elements from geometry, so they fill their cells.
 - **pnpm and Vitest** instead of Bun; no demo server, benchmark or release automation.
