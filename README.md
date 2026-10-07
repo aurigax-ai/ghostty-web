@@ -66,7 +66,9 @@ in the output stream:
 | `modes.mouseTrackingMode` | `none`, `x10`, `vt200`, `drag` or `any`                                                                |
 
 The render loop runs only while something changes (output, input, scrolling, selection, cursor
-blink) and sleeps otherwise.
+blink) and sleeps otherwise. `setPaused(true)` stops drawing a terminal that is off screen while it
+keeps parsing output; `setPaused(false)` redraws it whole. `setPaused(true, { releaseRenderer: true })`
+also gives up its WebGL context until then, since browsers keep only a few.
 
 ## Use
 
