@@ -32,6 +32,9 @@ interface TypeLayout {
   values?: Record<string, number>;
 }
 
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
 const I32 = 0x7f;
 const I64 = 0x7e;
 
@@ -95,13 +98,16 @@ export class GhosttyCallError extends Error {
 export class Abi {
   private readonly types: Record<string, TypeLayout>;
   private readonly freeSlots: number[] = [];
+  private scratchPtr = 0;
+  private scratchLen = 0;
+  private readonly input = { ptr: 0, len: 0, busy: false };
 
   constructor(readonly exports: VtExports) {
     const ptr = this.fn('ghostty_type_json')() as number;
     const bytes = new Uint8Array(exports.memory.buffer);
     let end = ptr;
     while (bytes[end] !== 0) end++;
-    this.types = JSON.parse(new TextDecoder().decode(bytes.subarray(ptr, end))).types;
+    this.types = JSON.parse(decoder.decode(bytes.subarray(ptr, end))).types;
   }
 
   fn(name: string): Fn {
@@ -188,6 +194,69 @@ export class Abi {
     });
   }
 
+  /**
+   * A zeroed buffer of at least `len` bytes, the same one on every call, for a
+   * read that is done with it before anything else calls scratch().
+   */
+  scratch(len: number): number {
+    if (len > this.scratchLen) {
+      if (this.scratchPtr) this.free(this.scratchPtr, this.scratchLen);
+      this.scratchPtr = 0;
+      this.scratchLen = 0;
+      const size = Math.max(len, 64);
+      this.scratchPtr = this.alloc(size);
+      this.scratchLen = size;
+    } else {
+      this.bytes().fill(0, this.scratchPtr, this.scratchPtr + len);
+    }
+    return this.scratchPtr;
+  }
+
+  /** scratch() holding a sized struct (its leading `size` field set), as GHOSTTY_INIT_SIZED does. */
+  scratchSized(type: string): number {
+    const size = this.sizeOf(type);
+    const ptr = this.scratch(size);
+    this.view().setUint32(ptr, size, true);
+    return ptr;
+  }
+
+  /**
+   * Runs `use` on text (as UTF-8) or bytes copied into a grow-only buffer kept
+   * between calls. A call from inside `use` (a terminal written to from one of
+   * the callbacks a write runs) gets a buffer of its own.
+   */
+  withInput<T>(data: string | Uint8Array, use: (ptr: number, len: number) => T): T {
+    if (this.input.busy) {
+      return this.withBytes(typeof data === 'string' ? encoder.encode(data) : data, use);
+    }
+    // UTF-8 takes at most 3 bytes per UTF-16 code unit.
+    const max = typeof data === 'string' ? data.length * 3 : data.length;
+    if (max === 0) return use(0, 0);
+    const input = this.input;
+    if (max > input.len) {
+      if (input.ptr) this.free(input.ptr, input.len);
+      input.ptr = 0;
+      input.len = 0;
+      const len = Math.max(max, 4096);
+      input.ptr = this.call('ghostty_wasm_alloc', len);
+      if (input.ptr === 0) throw new GhosttyCallError('ghostty_wasm_alloc', -1);
+      input.len = len;
+    }
+    const bytes = this.bytes();
+    let len = data.length;
+    if (typeof data === 'string') {
+      len = encoder.encodeInto(data, bytes.subarray(input.ptr, input.ptr + input.len)).written;
+    } else {
+      bytes.set(data, input.ptr);
+    }
+    input.busy = true;
+    try {
+      return use(input.ptr, len);
+    } finally {
+      input.busy = false;
+    }
+  }
+
   /** Runs a constructor that writes an opaque handle into an out slot and returns the handle. */
   newHandle(name: string, construct: (slot: number) => number): number {
     const slot = this.call('ghostty_wasm_alloc_opaque');
@@ -203,7 +272,7 @@ export class Abi {
 
   string(ptr: number, len: number): string {
     if (len === 0) return '';
-    return new TextDecoder().decode(this.bytes().slice(ptr, ptr + len));
+    return decoder.decode(this.bytes().subarray(ptr, ptr + len));
   }
 
   /** Registers a JavaScript callback in the function table and returns its index (the C function pointer). */

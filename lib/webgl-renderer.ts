@@ -524,7 +524,7 @@ export class WebglRenderer extends TerminalRenderer {
   // Rows
   // ==========================================================================
 
-  protected drawLine(line: GhosttyCell[], y: number, cols: number): void {
+  protected drawLine(line: readonly GhosttyCell[], y: number, cols: number): void {
     if (y < 0 || y >= this.rows) return;
     const cells = this.cols * this.rows;
     const rects = this.rectWords;
@@ -721,7 +721,7 @@ export class WebglRenderer extends TerminalRenderer {
       colors[4] = theme.cursor;
       key = `${left},${top},${this.cursorStyle},${overlay.focused}`;
       if (overlay.focused && this.cursorStyle === 'block') {
-        const cell = this.currentBuffer?.getLine(overlay.cursorY)?.[overlay.cursorX];
+        const cell = this.bufferLine(overlay.cursorY)?.[overlay.cursorX];
         if (cell && !isBlank(cell) && !(cell.flags & CellFlags.INVISIBLE)) {
           const entry = this.glyphFor(cell, overlay.cursorX, overlay.cursorY);
           if (entry) {
