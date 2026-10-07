@@ -5,7 +5,6 @@
  * - Mouse drag selection
  * - Double-click word selection
  * - Text extraction from terminal buffer
- * - Automatic clipboard copy
  * - Visual selection highlighting (integrated into CanvasRenderer cell rendering)
  * - Auto-scroll during drag selection
  */
@@ -588,11 +587,7 @@ export class SelectionManager {
         }
 
         if (this.hasSelection()) {
-          const text = this.getSelection();
-          if (text) {
-            this.copyToClipboard(text);
-            this.selectionChangedEmitter.fire();
-          }
+          if (this.getSelection()) this.selectionChangedEmitter.fire();
         }
       }
     };
@@ -613,11 +608,7 @@ export class SelectionManager {
           this.selectionEnd = { col: word.endCol, absoluteRow };
           this.requestRender();
 
-          const text = this.getSelection();
-          if (text) {
-            this.copyToClipboard(text);
-            this.selectionChangedEmitter.fire();
-          }
+          if (this.getSelection()) this.selectionChangedEmitter.fire();
         }
       } else if (e.detail >= 3) {
         // Triple-click (or more) - select line content (like native Ghostty)
@@ -654,11 +645,7 @@ export class SelectionManager {
           this.selectionEnd = { col: endCol, absoluteRow };
           this.requestRender();
 
-          const text = this.getSelection();
-          if (text) {
-            this.copyToClipboard(text);
-            this.selectionChangedEmitter.fire();
-          }
+          if (this.getSelection()) this.selectionChangedEmitter.fire();
         }
       }
     });

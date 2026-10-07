@@ -930,9 +930,19 @@ export class GhosttyTerminal {
   }
 
   isRowWrapped(row: number): boolean {
+    return this.rowContinues(POINT_ACTIVE, row);
+  }
+
+  /** Whether a scrollback line continues the one before it; offset 0 is the oldest line. */
+  isScrollbackRowWrapped(offset: number): boolean {
+    if (offset < 0 || offset >= this.getScrollbackLength()) return false;
+    return this.rowContinues(POINT_HISTORY, offset);
+  }
+
+  private rowContinues(point: PointSpace, row: number): boolean {
     const abi = this.abi;
     return (
-      this.gridRef(POINT_ACTIVE, 0, row, (ref) =>
+      this.gridRef(point, 0, row, (ref) =>
         abi.with(8, (rowPtr) => {
           if (abi.call('ghostty_grid_ref_row', ref, rowPtr) !== GHOSTTY_SUCCESS) return false;
           const raw = abi.view().getBigUint64(rowPtr, true);

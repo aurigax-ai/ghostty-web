@@ -1214,7 +1214,7 @@ describe('InputHandler', () => {
       expect(dataReceived.length).toBe(0);
     });
 
-    test('allows Ctrl+V to trigger paste', () => {
+    test('sends Ctrl+V to the program as ^V', () => {
       const handler = new InputHandler(
         ghostty,
         container as any,
@@ -1224,10 +1224,9 @@ describe('InputHandler', () => {
         }
       );
 
-      // Ctrl+V should NOT call onData callback (lets paste event handle it)
       simulateKey(container, createKeyEvent('KeyV', 'v', { ctrl: true }));
 
-      expect(dataReceived.length).toBe(0);
+      expect(dataReceived).toEqual(['\x16']);
     });
 
     test('allows Cmd+V to trigger paste', () => {

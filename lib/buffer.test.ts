@@ -133,6 +133,16 @@ describe('Buffer API', () => {
       expect(line!.isWrapped).toBe(false);
     });
 
+    test('a long line that scrolled into scrollback keeps its wrapped flag', () => {
+      term.write(`${'a'.repeat(120)}\r\n`);
+      for (let i = 0; i < 40; i++) term.write(`line ${i}\r\n`);
+      const buffer = term.buffer.active;
+      expect(term.getScrollbackLength()).toBeGreaterThan(1);
+      expect(buffer.getLine(0)!.isWrapped).toBe(false);
+      expect(buffer.getLine(1)!.isWrapped).toBe(true);
+      expect(buffer.getLine(2)!.isWrapped).toBe(false);
+    });
+
     test('translateToString should return line content', () => {
       term.write('Hello, World!');
       const buffer = term.buffer.active;
