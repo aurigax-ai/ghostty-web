@@ -229,7 +229,9 @@ export interface TrackedRow {
 
 const POINT_ACTIVE = 'ACTIVE';
 const POINT_HISTORY = 'HISTORY';
+const POINT_SCREEN = 'SCREEN';
 type PointSpace = typeof POINT_ACTIVE | typeof POINT_HISTORY;
+type PointTag = PointSpace | typeof POINT_SCREEN;
 
 const GRAPHEME_CAP = 16;
 const GRAPHEME_CLUSTER_MODE = 2027;
@@ -560,6 +562,8 @@ export class GhosttyTerminal {
   private readonly layout: CellLayout;
   private readonly scratch: ExtractScratch;
   private cellPool: GhosttyCell[] = [];
+  /** Each row of cellPool as an array of the same cell objects. */
+  private rowViews: GhosttyCell[][] = [];
   private rowDirty: boolean[] = [];
   private dirty: DirtyState = DirtyState.FULL;
   private changed = true;
@@ -569,8 +573,13 @@ export class GhosttyTerminal {
     cursor: null,
     palette: [],
   };
+  /** libghostty-vt changes the palette only with a full redraw, or through configure(). */
+  private paletteStale = true;
+  private cursor: RenderStateCursor | null = null;
   private responses: string[] = [];
   private callbacks: number[] = [];
+  /** A tracked row at the top of each screen, keyed by whether it is the alternate one. */
+  private screenTops = new Map<boolean, TrackedRow>();
 
   private readonly bellEmitter = new EventEmitter<void>();
   private readonly titleEmitter = new EventEmitter<string>();
@@ -658,8 +667,7 @@ export class GhosttyTerminal {
   // ==========================================================================
 
   write(data: string | Uint8Array): void {
-    const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
-    this.abi.withBytes(bytes, (ptr, len) =>
+    this.abi.withInput(data, (ptr, len) =>
       this.abi.call('ghostty_terminal_vt_write', this.handle, ptr, len)
     );
     this.changed = true;
@@ -681,6 +689,8 @@ export class GhosttyTerminal {
     abi.call('ghostty_render_state_row_iterator_free', this.rowIterator);
     abi.call('ghostty_render_state_free', this.renderState);
     abi.free(this.scratch.base, this.scratch.size);
+    for (const top of this.screenTops.values()) top.free();
+    this.screenTops.clear();
     abi.call('ghostty_terminal_free', this.handle);
     for (const index of this.callbacks) abi.removeCallback(index);
     this.callbacks = [];
@@ -713,43 +723,50 @@ export class GhosttyTerminal {
     abi.check('ghostty_render_state_update', this.renderState, this.handle);
     const dirty = this.readRenderU32('DIRTY') as DirtyState;
     if (dirty > this.dirty || this.dirty === DirtyState.NONE) this.dirty = dirty;
-    this.readColors();
+    this.cursor = null;
+    this.readColors(this.dirty === DirtyState.FULL || this.paletteStale);
+    this.paletteStale = false;
     this.extractRows(this.dirty === DirtyState.FULL);
     return this.dirty;
   }
 
+  /** The cursor as of the last update; the same object until the render state changes. */
   getCursor(): RenderStateCursor {
     this.update();
+    this.cursor ??= this.readCursor();
+    return this.cursor;
+  }
+
+  private readCursor(): RenderStateCursor {
     const abi = this.abi;
-    return abi.withSized('GhosttyRenderStateCursor', (ptr) => {
-      abi.check(
-        'ghostty_render_state_get',
-        this.renderState,
-        abi.enumValue('GhosttyRenderStateData', 'CURSOR'),
-        ptr
-      );
-      const view = abi.view();
-      const at = (f: string) => ptr + abi.offset('GhosttyRenderStateCursor', f);
-      const inViewport = view.getUint8(at('viewport_has_value')) !== 0;
-      const x = inViewport ? view.getUint16(at('viewport_x'), true) : -1;
-      const y = inViewport ? view.getUint16(at('viewport_y'), true) : -1;
-      const style = view.getInt32(at('visual_style'), true);
-      const styles = 'GhosttyRenderStateCursorVisualStyle';
-      return {
-        x,
-        y,
-        viewportX: x,
-        viewportY: y,
-        visible: inViewport && view.getUint8(at('visible')) !== 0,
-        blinking: view.getUint8(at('blinking')) !== 0,
-        style:
-          style === abi.enumValue(styles, 'BAR')
-            ? 'bar'
-            : style === abi.enumValue(styles, 'UNDERLINE')
-              ? 'underline'
-              : 'block',
-      };
-    });
+    const ptr = abi.scratchSized('GhosttyRenderStateCursor');
+    abi.check(
+      'ghostty_render_state_get',
+      this.renderState,
+      abi.enumValue('GhosttyRenderStateData', 'CURSOR'),
+      ptr
+    );
+    const view = abi.view();
+    const at = (f: string) => ptr + abi.offset('GhosttyRenderStateCursor', f);
+    const inViewport = view.getUint8(at('viewport_has_value')) !== 0;
+    const x = inViewport ? view.getUint16(at('viewport_x'), true) : -1;
+    const y = inViewport ? view.getUint16(at('viewport_y'), true) : -1;
+    const style = view.getInt32(at('visual_style'), true);
+    const styles = 'GhosttyRenderStateCursorVisualStyle';
+    return {
+      x,
+      y,
+      viewportX: x,
+      viewportY: y,
+      visible: inViewport && view.getUint8(at('visible')) !== 0,
+      blinking: view.getUint8(at('blinking')) !== 0,
+      style:
+        style === abi.enumValue(styles, 'BAR')
+          ? 'bar'
+          : style === abi.enumValue(styles, 'UNDERLINE')
+            ? 'underline'
+            : 'block',
+    };
   }
 
   /**
@@ -790,6 +807,17 @@ export class GhosttyTerminal {
     this.update();
     const start = y * this._cols;
     return this.cellPool.slice(start, start + this._cols).map((cell) => ({ ...cell }));
+  }
+
+  /**
+   * A row's cells as the renderer reads them: the terminal's own cell objects,
+   * updated in place by later updates, so read them before the next one and
+   * never modify them. getLine() returns a copy to keep.
+   */
+  getLineView(y: number): readonly GhosttyCell[] | null {
+    if (y < 0 || y >= this._rows) return null;
+    this.update();
+    return this.rowViews[y];
   }
 
   isDirty(): boolean {
@@ -833,13 +861,41 @@ export class GhosttyTerminal {
 
   /** Tracks the start of a row of the active area. */
   trackRow(activeY: number): TrackedRow | null {
+    return this.trackLineStart(POINT_ACTIVE, activeY);
+  }
+
+  /**
+   * Whether the terminal may have discarded rows since the last call, which is
+   * the only way a tracked row loses its line: libghostty-vt prunes scrollback
+   * from its first page and resets a screen whole, and either marks every
+   * tracked row on that page stale. A tracked row at the top of each screen
+   * goes stale with them. A screen is watched from the first call made while it
+   * is active.
+   */
+  rowsDiscarded(): boolean {
+    let discarded = false;
+    for (const [alternate, top] of this.screenTops) {
+      if (top.line() === 0) continue;
+      discarded = true;
+      top.free();
+      this.screenTops.delete(alternate);
+    }
+    const alternate = this.isAlternateScreen();
+    if (!this.screenTops.has(alternate)) {
+      const top = this.trackLineStart(POINT_SCREEN, 0);
+      if (top) this.screenTops.set(alternate, top);
+    }
+    return discarded;
+  }
+
+  private trackLineStart(tag: PointTag, y: number): TrackedRow | null {
     const abi = this.abi;
     const ref = abi.with(abi.sizeOf('GhosttyPoint'), (point) => {
       const view = abi.view();
-      view.setInt32(point, abi.enumValue('GhosttyPointTag', POINT_ACTIVE), true);
+      view.setInt32(point, abi.enumValue('GhosttyPointTag', tag), true);
       const coord = point + abi.offset('GhosttyPoint', 'value');
       view.setUint16(coord + abi.offset('GhosttyPointCoordinate', 'x'), 0, true);
-      view.setUint32(coord + abi.offset('GhosttyPointCoordinate', 'y'), activeY, true);
+      view.setUint32(coord + abi.offset('GhosttyPointCoordinate', 'y'), y, true);
       const slot = abi.call('ghostty_wasm_alloc_opaque');
       try {
         const result = abi.call('ghostty_terminal_grid_ref_track', this.handle, point, slot);
@@ -853,16 +909,11 @@ export class GhosttyTerminal {
     return {
       line: () => {
         if (freed) return null;
-        return abi.with(abi.sizeOf('GhosttyPointCoordinate'), (out) => {
-          const result = abi.call(
-            'ghostty_tracked_grid_ref_point',
-            ref,
-            abi.enumValue('GhosttyPointTag', 'SCREEN'),
-            out
-          );
-          if (result !== GHOSTTY_SUCCESS) return null;
-          return abi.view().getUint32(out + abi.offset('GhosttyPointCoordinate', 'y'), true);
-        });
+        const out = abi.scratch(abi.sizeOf('GhosttyPointCoordinate'));
+        const tag = abi.enumValue('GhosttyPointTag', POINT_SCREEN);
+        if (abi.call('ghostty_tracked_grid_ref_point', ref, tag, out) !== GHOSTTY_SUCCESS)
+          return null;
+        return abi.view().getUint32(out + abi.offset('GhosttyPointCoordinate', 'y'), true);
       },
       free: () => {
         if (freed) return;
@@ -1009,6 +1060,8 @@ export class GhosttyTerminal {
    */
   configure(config: GhosttyTerminalConfig): void {
     const abi = this.abi;
+    this.paletteStale = true;
+    this.changed = true;
     if (config.scrollbackLimit !== undefined) {
       this.setOption('SCROLLBACK_MAX_BYTES', 0);
       abi.with(4, (ptr) => {
@@ -1170,46 +1223,35 @@ export class GhosttyTerminal {
 
   private readTerminalU32(data: string): number {
     const abi = this.abi;
-    return abi.with(8, (out) => {
-      abi.check(
-        'ghostty_terminal_get',
-        this.handle,
-        abi.enumValue('GhosttyTerminalData', data),
-        out
-      );
-      return abi.view().getUint32(out, true);
-    });
+    const out = abi.scratch(8);
+    abi.check('ghostty_terminal_get', this.handle, abi.enumValue('GhosttyTerminalData', data), out);
+    return abi.view().getUint32(out, true);
   }
 
   private readTerminalU16(data: string): number {
     const abi = this.abi;
-    return abi.with(8, (out) => {
-      abi.check(
-        'ghostty_terminal_get',
-        this.handle,
-        abi.enumValue('GhosttyTerminalData', data),
-        out
-      );
-      return abi.view().getUint16(out, true);
-    });
+    const out = abi.scratch(8);
+    abi.check('ghostty_terminal_get', this.handle, abi.enumValue('GhosttyTerminalData', data), out);
+    return abi.view().getUint16(out, true);
   }
 
   private readRenderU32(data: string): number {
     const abi = this.abi;
-    return abi.with(8, (out) => {
-      abi.check(
-        'ghostty_render_state_get',
-        this.renderState,
-        abi.enumValue('GhosttyRenderStateData', data),
-        out
-      );
-      return abi.view().getUint32(out, true);
-    });
+    const out = abi.scratch(8);
+    abi.check(
+      'ghostty_render_state_get',
+      this.renderState,
+      abi.enumValue('GhosttyRenderStateData', data),
+      out
+    );
+    return abi.view().getUint32(out, true);
   }
 
-  private readColors(): void {
+  /** Reads the colors cells are drawn with; the 256-color palette only when `palette`. */
+  private readColors(palette: boolean): void {
     const abi = this.abi;
-    abi.withSized('GhosttyRenderStateColors', (ptr) => {
+    if (palette) {
+      const ptr = abi.scratchSized('GhosttyRenderStateColors');
       abi.check(
         'ghostty_render_state_get',
         this.renderState,
@@ -1218,16 +1260,16 @@ export class GhosttyTerminal {
       );
       const view = abi.view();
       const at = (f: string) => ptr + abi.offset('GhosttyRenderStateColors', f);
-      const palette: RGB[] = [];
-      for (let i = 0; i < 256; i++) palette.push(rgbAt(view, at('palette') + i * 3));
+      const colors: RGB[] = [];
+      for (let i = 0; i < 256; i++) colors.push(rgbAt(view, at('palette') + i * 3));
       this.colors = {
         background: rgbAt(view, at('background')),
         foreground: rgbAt(view, at('foreground')),
         cursor: view.getUint8(at('cursor_has_value')) ? rgbAt(view, at('cursor')) : null,
-        palette,
+        palette: colors,
       };
-    });
-    this.readTerminalColors();
+    }
+    this.readTerminalColors(palette);
   }
 
   /**
@@ -1235,28 +1277,27 @@ export class GhosttyTerminal {
    * ghostty_terminal_set, so the effective colors (a program's OSC override,
    * else the default) are read from the terminal itself.
    */
-  private readTerminalColors(): void {
+  private readTerminalColors(palette: boolean): void {
     const abi = this.abi;
     const data = (name: string) => abi.enumValue('GhosttyTerminalData', name);
-    const rgb = (name: string): RGB | null =>
-      abi.with(4, (ptr) =>
-        abi.call('ghostty_terminal_get', this.handle, data(name), ptr) === GHOSTTY_SUCCESS
-          ? rgbAt(abi.view(), ptr)
-          : null
-      );
+    const rgb = (name: string): RGB | null => {
+      const ptr = abi.scratch(4);
+      return abi.call('ghostty_terminal_get', this.handle, data(name), ptr) === GHOSTTY_SUCCESS
+        ? rgbAt(abi.view(), ptr)
+        : null;
+    };
     this.colors.background = rgb('COLOR_BACKGROUND') ?? this.colors.background;
     this.colors.foreground = rgb('COLOR_FOREGROUND') ?? this.colors.foreground;
     this.colors.cursor = rgb('COLOR_CURSOR') ?? this.colors.cursor;
-    abi.with(256 * 3, (ptr) => {
-      if (
-        abi.call('ghostty_terminal_get', this.handle, data('COLOR_PALETTE'), ptr) !==
-        GHOSTTY_SUCCESS
-      ) {
-        return;
-      }
-      const view = abi.view();
-      for (let i = 0; i < 256; i++) this.colors.palette[i] = rgbAt(view, ptr + i * 3);
-    });
+    if (!palette) return;
+    const ptr = abi.scratch(256 * 3);
+    if (
+      abi.call('ghostty_terminal_get', this.handle, data('COLOR_PALETTE'), ptr) !== GHOSTTY_SUCCESS
+    ) {
+      return;
+    }
+    const view = abi.view();
+    for (let i = 0; i < 256; i++) this.colors.palette[i] = rgbAt(view, ptr + i * 3);
   }
 
   private extractRows(all: boolean): void {
@@ -1476,6 +1517,10 @@ export class GhosttyTerminal {
     const total = this._cols * this._rows;
     while (this.cellPool.length < total) this.cellPool.push(GhosttyTerminal.emptyCell());
     this.cellPool.length = total;
+    this.rowViews = [];
+    for (let y = 0; y < this._rows; y++) {
+      this.rowViews.push(this.cellPool.slice(y * this._cols, (y + 1) * this._cols));
+    }
     this.rowDirty = new Array(this._rows).fill(true);
     this.dirty = DirtyState.FULL;
   }

@@ -263,7 +263,7 @@ export class Terminal implements ITerminalCore {
         this.wasmTerm?.configure(this.themeConfig());
         if (this.renderer && this.wasmTerm) {
           this.renderer.setTheme(this.options.theme);
-          this.renderer.render(this.wasmTerm, true, this.viewportY, this, this.scrollbarOpacity);
+          this.draw(true, this.scrollbarOpacity);
         }
         break;
 
@@ -283,7 +283,7 @@ export class Terminal implements ITerminalCore {
       case 'minimumContrastRatio':
         if (this.renderer && this.wasmTerm) {
           this.renderer.setMinimumContrastRatio(this.options.minimumContrastRatio);
-          this.renderer.render(this.wasmTerm, true, this.viewportY, this, this.scrollbarOpacity);
+          this.draw(true, this.scrollbarOpacity);
         }
         break;
 
@@ -329,7 +329,7 @@ export class Terminal implements ITerminalCore {
     this.renderer.resize(this.cols, this.rows);
 
     // Force full re-render with new font
-    this.renderer.render(this.wasmTerm, true, this.viewportY, this);
+    this.draw(true);
   }
 
   /**
@@ -578,7 +578,7 @@ export class Terminal implements ITerminalCore {
       parent.addEventListener('wheel', this.handleWheel, { passive: false, capture: true });
 
       // Render initial blank screen (force full redraw)
-      this.renderer.render(this.wasmTerm, true, this.viewportY, this, this.scrollbarOpacity);
+      this.draw(true, this.scrollbarOpacity);
 
       // Start render loop
       this.startRenderLoop();
@@ -638,10 +638,16 @@ export class Terminal implements ITerminalCore {
 
   /** Replaces a WebGL renderer whose context was lost with a canvas renderer on the same canvas. */
   private fallBackToCanvas(): void {
-    if (!this.renderer || !this.canvas || !(this.renderer instanceof WebglRenderer)) return;
-    const hoveredLink = this.renderer.getHoveredHyperlinkId();
-    this.renderer.dispose();
-    const renderer = new CanvasRenderer(this.canvas, this.rendererOptions());
+    if (!this.canvas || !(this.renderer instanceof WebglRenderer)) return;
+    this.installRenderer(new CanvasRenderer(this.canvas, this.rendererOptions()));
+    this.wake();
+  }
+
+  /** Disposes the current renderer and draws with `renderer` from now on, in its state. */
+  private installRenderer(renderer: TerminalRenderer): void {
+    const old = this.renderer!;
+    const hoveredLink = old.getHoveredHyperlinkId();
+    old.dispose();
     renderer.onNeedsFrame = () => this.requestFrame();
     renderer.setHoveredHyperlinkId(hoveredLink);
     renderer.setFocused(this.focused);
@@ -652,10 +658,47 @@ export class Terminal implements ITerminalCore {
     }
     this.renderer = renderer;
     renderer.resize(this.cols, this.rows);
-    if (this.wasmTerm) {
-      renderer.render(this.wasmTerm, true, this.viewportY, this, this.scrollbarOpacity);
+    this.draw(true, this.scrollbarOpacity);
+  }
+
+  private paused = false;
+  private rendererReleased = false;
+
+  /**
+   * Pauses drawing, for a terminal that is not on screen. Writes still parse and
+   * the buffer, markers and events stay current, but no frame is drawn and
+   * onRender does not fire until resumed, which redraws the whole screen once.
+   * `releaseRenderer` also gives up a WebGL context until then (browsers keep
+   * only a few), at the cost of rebuilding the glyph atlas on resume.
+   */
+  setPaused(paused: boolean, options: { releaseRenderer?: boolean } = {}): void {
+    if (paused) {
+      this.paused = true;
+      this.cancelRenderLoop();
+      if (options.releaseRenderer && this.canvas && this.renderer instanceof WebglRenderer) {
+        // A canvas renderer that never draws keeps metrics and sizing until resume.
+        this.installRenderer(new CanvasRenderer(this.canvas, this.rendererOptions()));
+        this.rendererReleased = true;
+      }
+      return;
     }
-    this.wake();
+    if (!this.paused) return;
+    this.paused = false;
+    if (!this.isOpen || this.isDisposed) return;
+    if (this.rendererReleased) {
+      this.rendererReleased = false;
+      this.installRenderer(this.createRenderer());
+    } else {
+      this.draw(true, this.scrollbarOpacity);
+    }
+    this.renderEmitter.fire({ start: 0, end: this.rows - 1 });
+    this.requestFrame();
+  }
+
+  /** Draws a frame now unless paused; forceAll redraws every row. */
+  private draw(forceAll: boolean, scrollbarOpacity?: number): void {
+    if (this.paused || !this.renderer || !this.wasmTerm) return;
+    this.renderer.render(this.wasmTerm, forceAll, this.viewportY, this, scrollbarOpacity);
   }
 
   /**
@@ -706,9 +749,7 @@ export class Terminal implements ITerminalCore {
 
     if (this.awaitingEcho) {
       this.awaitingEcho = false;
-      if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this, this.scrollbarOpacity);
-      }
+      this.draw(false, this.scrollbarOpacity);
     }
 
     // Render will happen on next animation frame
@@ -800,6 +841,7 @@ export class Terminal implements ITerminalCore {
 
       // Resize WASM terminal (may reallocate buffers, invalidating TypedArray views)
       this.wasmTerm!.resize(cols, rows);
+      this.refreshMarkers(false);
 
       // Resize renderer
       this.renderer!.resize(cols, rows);
@@ -808,7 +850,7 @@ export class Terminal implements ITerminalCore {
       this.resizeEmitter.fire({ cols, rows });
 
       // Force full render
-      this.renderer!.render(this.wasmTerm!, true, this.viewportY, this);
+      this.draw(true);
     } catch (e) {
       console.error('Terminal resize failed:', e);
     }
@@ -1271,12 +1313,12 @@ export class Terminal implements ITerminalCore {
    * Start the render loop
    */
   private startRenderLoop(): void {
-    if (this.animationFrameId) return;
+    if (this.animationFrameId || this.paused) return;
     const loop = () => {
       this.animationFrameId = undefined;
       if (this.isDisposed || !this.isOpen) return;
       const drew = this.wasmTerm!.update() !== DirtyState.NONE;
-      this.renderer!.render(this.wasmTerm!, false, this.viewportY, this, this.scrollbarOpacity);
+      this.draw(false, this.scrollbarOpacity);
       if (drew) this.renderEmitter.fire({ start: 0, end: this.rows - 1 });
       const cursor = this.wasmTerm!.getCursor();
       if (cursor.y !== this.lastCursorY) {
@@ -1889,9 +1931,7 @@ export class Terminal implements ITerminalCore {
       this.scrollbarOpacity = progress;
 
       // Trigger render to show updated opacity
-      if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this, this.scrollbarOpacity);
-      }
+      this.draw(false, this.scrollbarOpacity);
 
       if (progress < 1) {
         requestAnimationFrame(animate);
@@ -1913,9 +1953,7 @@ export class Terminal implements ITerminalCore {
       this.scrollbarOpacity = startOpacity * (1 - progress);
 
       // Trigger render to show updated opacity
-      if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this, this.scrollbarOpacity);
-      }
+      this.draw(false, this.scrollbarOpacity);
 
       if (progress < 1) {
         requestAnimationFrame(animate);
@@ -1923,9 +1961,7 @@ export class Terminal implements ITerminalCore {
         this.scrollbarVisible = false;
         this.scrollbarOpacity = 0;
         // Final render to clear scrollbar completely
-        if (this.renderer && this.wasmTerm) {
-          this.renderer.render(this.wasmTerm, false, this.viewportY, this, 0);
-        }
+        this.draw(false, 0);
       }
     };
     animate();
@@ -1973,6 +2009,8 @@ export class Terminal implements ITerminalCore {
     if (!this.wasmTerm) return undefined;
     const y = this.wasmTerm.cursorPosition().y + cursorYOffset;
     if (y < 0 || y >= this.rows) return undefined;
+    // Starts watching the active screen for discarded rows before the marker exists.
+    if (this.wasmTerm.rowsDiscarded()) this.refreshMarkers(true);
     const row = this.wasmTerm.trackRow(y);
     if (!row) return undefined;
     const marker = new Marker(row);
@@ -2065,8 +2103,10 @@ export class Terminal implements ITerminalCore {
     if (alternate !== this.lastAlternate) {
       this.lastAlternate = alternate;
       (this.buffer as BufferNamespace)._fireBufferChange(this.buffer.active);
+      this.refreshMarkers(true);
+    } else {
+      this.refreshMarkers(false);
     }
-    for (const marker of [...this.markers]) marker.refresh();
     this.writeParsedEmitter.fire();
     this.wake();
   }
@@ -2086,6 +2126,13 @@ export class Terminal implements ITerminalCore {
   /** Fires onScroll with the absolute line at the top of the viewport, as xterm.js does. */
   private fireScroll(): void {
     this.scrollEmitter.fire(this.buffer.active.viewportY);
+  }
+
+  /** Disposes the markers whose line is gone; only rows the engine discarded can be. */
+  private refreshMarkers(force: boolean): void {
+    if (this.markers.size === 0 || !this.wasmTerm) return;
+    if (!this.wasmTerm.rowsDiscarded() && !force) return;
+    for (const marker of [...this.markers]) marker.refresh();
   }
 
   private disposeMarkers(): void {

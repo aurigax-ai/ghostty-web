@@ -17,6 +17,8 @@ import { CellFlags } from './types';
 // Interface for objects that can be rendered
 export interface IRenderable {
   getLine(y: number): GhosttyCell[] | null;
+  /** A row's cells without a copy, read before the buffer next changes; getLine() when absent. */
+  getLineView?(y: number): readonly GhosttyCell[] | null;
   getCursor(): { x: number; y: number; visible: boolean };
   getDimensions(): { cols: number; rows: number };
   isRowDirty(y: number): boolean;
@@ -247,6 +249,8 @@ export abstract class TerminalRenderer {
   protected lastCursorPosition: { x: number; y: number } = { x: 0, y: 0 };
   private lastViewportY = 0;
   private fullRedrawPending = false;
+  /** The cursor and scrollbar the last finished frame showed. */
+  private shownOverlay: FrameOverlay | null = null;
 
   /** The buffer of the frame being drawn, for grapheme lookups. */
   protected currentBuffer: IRenderable | null = null;
@@ -290,7 +294,7 @@ export abstract class TerminalRenderer {
   }
 
   /** Draws one viewport row. */
-  protected abstract drawLine(line: GhosttyCell[], y: number, cols: number): void;
+  protected abstract drawLine(line: readonly GhosttyCell[], y: number, cols: number): void;
   /** Whether the drawing surface no longer matches cols × rows. */
   protected abstract surfaceMismatch(cols: number, rows: number): boolean;
   /** Draws the cursor and scrollbar and presents the frame. */
@@ -334,14 +338,15 @@ export abstract class TerminalRenderer {
       this.cursorVisible !== this.lastCursorVisible || this.focused !== this.lastFocused;
     this.lastCursorVisible = this.cursorVisible;
     this.lastFocused = this.focused;
-    if (this.cursorInRows && (cursorMoved || blinked)) {
+    // Scrolled back the cursor is not shown, and its row is not on screen where it is in the buffer.
+    if (this.cursorInRows && viewportY === 0 && (cursorMoved || blinked)) {
       if (!forceAll && !buffer.isRowDirty(cursor.y)) {
-        const line = buffer.getLine(cursor.y);
+        const line = this.bufferLine(cursor.y);
         if (line) this.drawLine(line, cursor.y, dims.cols);
       }
       if (cursorMoved && this.lastCursorPosition.y !== cursor.y) {
         if (!forceAll && !buffer.isRowDirty(this.lastCursorPosition.y)) {
-          const line = buffer.getLine(this.lastCursorPosition.y);
+          const line = this.bufferLine(this.lastCursorPosition.y);
           if (line) this.drawLine(line, this.lastCursorPosition.y, dims.cols);
         }
       }
@@ -364,14 +369,19 @@ export abstract class TerminalRenderer {
       }
     }
 
-    const lineAt = (y: number): GhosttyCell[] | null => {
+    const lineAt = (y: number): readonly GhosttyCell[] | null => {
       if (viewportY > 0) {
         if (y < viewportY && scrollbackProvider) {
           return scrollbackProvider.getScrollbackLine(scrollbackLength - Math.floor(viewportY) + y);
         }
-        return buffer.getLine(y - Math.floor(viewportY));
+        return this.bufferLine(y - Math.floor(viewportY));
       }
-      return buffer.getLine(y);
+      return this.bufferLine(y);
+    };
+    // Scrolled back, viewport row y shows active row y - viewportY; rows above it show scrollback.
+    const rowDirty = (y: number): boolean => {
+      const active = y - Math.floor(viewportY);
+      return active >= 0 && buffer.isRowDirty(active);
     };
 
     const hyperlinkRows = new Set<number>();
@@ -401,12 +411,7 @@ export abstract class TerminalRenderer {
 
     const rowsToRender = new Set<number>();
     for (let y = 0; y < dims.rows; y++) {
-      const needsRender =
-        viewportY > 0 ||
-        forceAll ||
-        buffer.isRowDirty(y) ||
-        selectionRows.has(y) ||
-        hyperlinkRows.has(y);
+      const needsRender = forceAll || rowDirty(y) || selectionRows.has(y) || hyperlinkRows.has(y);
       if (needsRender) {
         rowsToRender.add(y);
         if (y > 0) rowsToRender.add(y - 1);
@@ -419,7 +424,7 @@ export abstract class TerminalRenderer {
       if (line) this.drawLine(line, y, dims.cols);
     }
 
-    this.finishFrame({
+    const overlay: FrameOverlay = {
       cursorX: cursor.x,
       cursorY: cursor.y,
       showCursor: viewportY === 0 && cursor.visible && this.cursorVisible,
@@ -429,9 +434,21 @@ export abstract class TerminalRenderer {
       cols: dims.cols,
       rows: dims.rows,
       scrollbarOpacity: scrollbackProvider ? scrollbarOpacity : 0,
-    });
+    };
+    // A frame with no row drawn and the same cursor and scrollbar has nothing to show.
+    if (rowsToRender.size > 0 || !sameOverlay(overlay, this.shownOverlay)) {
+      this.finishFrame(overlay);
+      this.shownOverlay = overlay;
+    }
     this.lastCursorPosition = { x: cursor.x, y: cursor.y };
     buffer.clearDirty();
+  }
+
+  /** A row of the buffer being drawn, without a copy when the buffer offers one. */
+  protected bufferLine(y: number): readonly GhosttyCell[] | null {
+    const buffer = this.currentBuffer;
+    if (!buffer) return null;
+    return buffer.getLineView ? buffer.getLineView(y) : buffer.getLine(y);
   }
 
   // ==========================================================================
@@ -441,6 +458,7 @@ export abstract class TerminalRenderer {
   /** Makes the next frame redraw every row. */
   protected requestFullRedraw(): void {
     this.fullRedrawPending = true;
+    this.shownOverlay = null;
   }
 
   /** The text of a cell: its grapheme cluster when it has one, else its codepoint. */
@@ -625,7 +643,9 @@ export abstract class TerminalRenderer {
   }
 
   public setCursorStyle(style: CursorStyle): void {
+    if (style === this.cursorStyle) return;
     this.cursorStyle = style;
+    this.requestFullRedraw();
   }
 
   public setCursorBlink(enabled: boolean): void {
@@ -698,6 +718,21 @@ export function cssRgb(css: string): [number, number, number] {
   const rgb = /rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)/i.exec(css);
   if (rgb) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
   return [0, 0, 0];
+}
+
+function sameOverlay(a: FrameOverlay, b: FrameOverlay | null): boolean {
+  return (
+    b !== null &&
+    a.cursorX === b.cursorX &&
+    a.cursorY === b.cursorY &&
+    a.showCursor === b.showCursor &&
+    a.focused === b.focused &&
+    a.viewportY === b.viewportY &&
+    a.scrollbackLength === b.scrollbackLength &&
+    a.cols === b.cols &&
+    a.rows === b.rows &&
+    a.scrollbarOpacity === b.scrollbarOpacity
+  );
 }
 
 function sameRange(a: LinkRange | null, b: LinkRange | null): boolean {
@@ -774,7 +809,7 @@ export class CanvasRenderer extends TerminalRenderer {
    * of one color are one rect; runs of plain ASCII in one style are one
    * fillText, spaced to the cell grid with letterSpacing.
    */
-  protected drawLine(line: GhosttyCell[], y: number, cols: number): void {
+  protected drawLine(line: readonly GhosttyCell[], y: number, cols: number): void {
     const ctx = this.ctx;
     const cellW = this.metrics.width;
     const cellH = this.metrics.height;
@@ -1007,7 +1042,7 @@ export class CanvasRenderer extends TerminalRenderer {
       );
     } else if (this.cursorStyle === 'block') {
       this.ctx.fillRect(cursorX, cursorY, this.metrics.width, this.metrics.height);
-      const line = this.currentBuffer?.getLine(y);
+      const line = this.bufferLine(y);
       if (line?.[x]) {
         this.ctx.save();
         this.ctx.beginPath();

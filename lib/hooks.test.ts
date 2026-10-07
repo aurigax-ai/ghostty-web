@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { SemanticPromptEvent } from './ghostty';
-import type { IMarker } from './marker';
+import { type IMarker, Marker } from './marker';
 import type { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
 
@@ -43,6 +43,43 @@ describe('host hooks', () => {
     expect(marker!.line).toBe(startLine);
     expect(t.buffer.active.baseY).toBeGreaterThan(startLine);
     expect(t.buffer.active.getLine(marker!.line)?.translateToString(true)).toBe('~ $ marked');
+  });
+
+  test('a write that discards no rows refreshes no marker', async () => {
+    const t = await openTerminal(40, 5);
+    const markers = [t.registerMarker(0)!, t.registerMarker(1)!];
+    const refresh = vi.spyOn(Marker.prototype, 'refresh');
+    try {
+      for (let i = 0; i < 50; i++) t.write(`output ${i}\r\n`);
+      expect(refresh).not.toHaveBeenCalled();
+    } finally {
+      refresh.mockRestore();
+    }
+    expect(markers.every((m) => !m.isDisposed)).toBe(true);
+  });
+
+  test('disposes a marker the write that prunes its line, and keeps the others on theirs', async () => {
+    term = await createIsolatedTerminal({ cols: 40, rows: 5, scrollback: 100 });
+    const t = term;
+    t.open(document.createElement('div'));
+    const first = t.registerMarker(0)!;
+    let disposed = false;
+    first.onDispose(() => {
+      disposed = true;
+    });
+    let i = 0;
+    while (!disposed && i < 20_000) t.write(`line ${i++}\r\n`);
+    expect(disposed).toBe(true);
+
+    t.write('\x1b]133;A\x07~ $ kept\r\n');
+    const kept = t.registerMarker(-1)!;
+    let keptDisposed = false;
+    kept.onDispose(() => {
+      keptDisposed = true;
+    });
+    for (let j = 0; j < 20; j++) t.write(`after ${j}\r\n`);
+    expect(keptDisposed).toBe(false);
+    expect(t.buffer.active.getLine(kept.line)?.translateToString(true)).toBe('~ $ kept');
   });
 
   test('disposes a marker when its terminal resets', async () => {
