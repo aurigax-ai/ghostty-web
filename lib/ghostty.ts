@@ -1000,6 +1000,7 @@ export class GhosttyTerminal {
   configure(config: GhosttyTerminalConfig): void {
     const abi = this.abi;
     if (config.scrollbackLimit !== undefined) {
+      this.setOption('SCROLLBACK_MAX_BYTES', 0);
       abi.with(4, (ptr) => {
         abi.view().setUint32(ptr, config.scrollbackLimit!, true);
         this.setOption('SCROLLBACK_MAX_LINES', ptr);

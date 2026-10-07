@@ -31,6 +31,16 @@ describe('terminal options', () => {
     expect(t.wasmTerm!.getColors().foreground).toEqual({ r: 255, g: 0, b: 0 });
   });
 
+  test('scrollback keeps about as many lines as asked, and a lower limit drops older ones', async () => {
+    const t = await open({ scrollback: 5000 });
+    for (let i = 0; i < 20000; i++) t.write(`line ${i}\r\n`);
+    expect(t.getScrollbackLength()).toBeGreaterThan(3500);
+    expect(t.getScrollbackLength()).toBeLessThanOrEqual(5500);
+    t.options.scrollback = 1000;
+    t.write('\r\n');
+    expect(t.getScrollbackLength()).toBeLessThanOrEqual(1500);
+  });
+
   test('scrollSensitivity multiplies wheel scrolling', async () => {
     const t = await open({ smoothScrollDuration: 0, scrollSensitivity: 2 });
     for (let i = 0; i < 60; i++) t.write(`line ${i}\r\n`);
