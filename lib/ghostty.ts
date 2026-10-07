@@ -229,7 +229,9 @@ export interface TrackedRow {
 
 const POINT_ACTIVE = 'ACTIVE';
 const POINT_HISTORY = 'HISTORY';
+const POINT_SCREEN = 'SCREEN';
 type PointSpace = typeof POINT_ACTIVE | typeof POINT_HISTORY;
+type PointTag = PointSpace | typeof POINT_SCREEN;
 
 const GRAPHEME_CAP = 16;
 const GRAPHEME_CLUSTER_MODE = 2027;
@@ -571,6 +573,8 @@ export class GhosttyTerminal {
   };
   private responses: string[] = [];
   private callbacks: number[] = [];
+  /** A tracked row at the top of each screen, keyed by whether it is the alternate one. */
+  private screenTops = new Map<boolean, TrackedRow>();
 
   private readonly bellEmitter = new EventEmitter<void>();
   private readonly titleEmitter = new EventEmitter<string>();
@@ -681,6 +685,8 @@ export class GhosttyTerminal {
     abi.call('ghostty_render_state_row_iterator_free', this.rowIterator);
     abi.call('ghostty_render_state_free', this.renderState);
     abi.free(this.scratch.base, this.scratch.size);
+    for (const top of this.screenTops.values()) top.free();
+    this.screenTops.clear();
     abi.call('ghostty_terminal_free', this.handle);
     for (const index of this.callbacks) abi.removeCallback(index);
     this.callbacks = [];
@@ -833,13 +839,41 @@ export class GhosttyTerminal {
 
   /** Tracks the start of a row of the active area. */
   trackRow(activeY: number): TrackedRow | null {
+    return this.trackLineStart(POINT_ACTIVE, activeY);
+  }
+
+  /**
+   * Whether the terminal may have discarded rows since the last call, which is
+   * the only way a tracked row loses its line: libghostty-vt prunes scrollback
+   * from its first page and resets a screen whole, and either marks every
+   * tracked row on that page stale. A tracked row at the top of each screen
+   * goes stale with them. A screen is watched from the first call made while it
+   * is active.
+   */
+  rowsDiscarded(): boolean {
+    let discarded = false;
+    for (const [alternate, top] of this.screenTops) {
+      if (top.line() === 0) continue;
+      discarded = true;
+      top.free();
+      this.screenTops.delete(alternate);
+    }
+    const alternate = this.isAlternateScreen();
+    if (!this.screenTops.has(alternate)) {
+      const top = this.trackLineStart(POINT_SCREEN, 0);
+      if (top) this.screenTops.set(alternate, top);
+    }
+    return discarded;
+  }
+
+  private trackLineStart(tag: PointTag, y: number): TrackedRow | null {
     const abi = this.abi;
     const ref = abi.with(abi.sizeOf('GhosttyPoint'), (point) => {
       const view = abi.view();
-      view.setInt32(point, abi.enumValue('GhosttyPointTag', POINT_ACTIVE), true);
+      view.setInt32(point, abi.enumValue('GhosttyPointTag', tag), true);
       const coord = point + abi.offset('GhosttyPoint', 'value');
       view.setUint16(coord + abi.offset('GhosttyPointCoordinate', 'x'), 0, true);
-      view.setUint32(coord + abi.offset('GhosttyPointCoordinate', 'y'), activeY, true);
+      view.setUint32(coord + abi.offset('GhosttyPointCoordinate', 'y'), y, true);
       const slot = abi.call('ghostty_wasm_alloc_opaque');
       try {
         const result = abi.call('ghostty_terminal_grid_ref_track', this.handle, point, slot);
@@ -857,7 +891,7 @@ export class GhosttyTerminal {
           const result = abi.call(
             'ghostty_tracked_grid_ref_point',
             ref,
-            abi.enumValue('GhosttyPointTag', 'SCREEN'),
+            abi.enumValue('GhosttyPointTag', POINT_SCREEN),
             out
           );
           if (result !== GHOSTTY_SUCCESS) return null;

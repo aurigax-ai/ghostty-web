@@ -800,6 +800,7 @@ export class Terminal implements ITerminalCore {
 
       // Resize WASM terminal (may reallocate buffers, invalidating TypedArray views)
       this.wasmTerm!.resize(cols, rows);
+      this.refreshMarkers(false);
 
       // Resize renderer
       this.renderer!.resize(cols, rows);
@@ -1973,6 +1974,8 @@ export class Terminal implements ITerminalCore {
     if (!this.wasmTerm) return undefined;
     const y = this.wasmTerm.cursorPosition().y + cursorYOffset;
     if (y < 0 || y >= this.rows) return undefined;
+    // Starts watching the active screen for discarded rows before the marker exists.
+    if (this.wasmTerm.rowsDiscarded()) this.refreshMarkers(true);
     const row = this.wasmTerm.trackRow(y);
     if (!row) return undefined;
     const marker = new Marker(row);
@@ -2065,8 +2068,10 @@ export class Terminal implements ITerminalCore {
     if (alternate !== this.lastAlternate) {
       this.lastAlternate = alternate;
       (this.buffer as BufferNamespace)._fireBufferChange(this.buffer.active);
+      this.refreshMarkers(true);
+    } else {
+      this.refreshMarkers(false);
     }
-    for (const marker of [...this.markers]) marker.refresh();
     this.writeParsedEmitter.fire();
     this.wake();
   }
@@ -2086,6 +2091,13 @@ export class Terminal implements ITerminalCore {
   /** Fires onScroll with the absolute line at the top of the viewport, as xterm.js does. */
   private fireScroll(): void {
     this.scrollEmitter.fire(this.buffer.active.viewportY);
+  }
+
+  /** Disposes the markers whose line is gone; only rows the engine discarded can be. */
+  private refreshMarkers(force: boolean): void {
+    if (this.markers.size === 0 || !this.wasmTerm) return;
+    if (!this.wasmTerm.rowsDiscarded() && !force) return;
+    for (const marker of [...this.markers]) marker.refresh();
   }
 
   private disposeMarkers(): void {
