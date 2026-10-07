@@ -11,6 +11,7 @@
  */
 
 import { drawBoxGlyph, isBoxGlyph } from './box-glyphs';
+import { glyphInk } from './glyph-ink';
 import type { ITheme } from './interfaces';
 import {
   type FrameOverlay,
@@ -21,15 +22,20 @@ import {
 } from './renderer';
 import type { GhosttyCell } from './types';
 import { CellFlags } from './types';
+import {
+  GLYPH_WORDS,
+  type InstanceArrays,
+  RECT_WORDS,
+  compactGlyphs,
+  compactRects,
+  instanceArrays,
+} from './webgl-instances';
 
-const RECT_WORDS = 5;
-const GLYPH_WORDS = 8;
 const CURSOR_RECTS = 4;
 const SCROLLBAR_RECTS = 2;
 const OVERLAY_RECTS = CURSOR_RECTS + SCROLLBAR_RECTS;
 const ATLAS_START = 512;
 const ATLAS_MAX = 4096;
-const COLORED_SPREAD = 24;
 
 const VERTEX_RECT = `#version 300 es
 layout(location = 0) in vec2 a_corner;
@@ -88,11 +94,14 @@ void main() {
   }
 }`;
 
+/** A glyph's ink in the atlas; `ox`, `oy` place it within the glyph's padded slot. */
 interface AtlasEntry {
   x: number;
   y: number;
   w: number;
   h: number;
+  ox: number;
+  oy: number;
   colored: boolean;
 }
 
@@ -181,21 +190,8 @@ class GlyphAtlas {
     draw(ctx, 0, 0);
     ctx.restore();
     const pixels = ctx.getImageData(0, 0, w, h);
-    const data = pixels.data;
-    let inked = false;
-    let colored = false;
-    for (let i = 0; i < data.length; i += 4) {
-      if (data[i + 3] === 0) continue;
-      inked = true;
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      if (Math.max(r, g, b) - Math.min(r, g, b) > COLORED_SPREAD) {
-        colored = true;
-        break;
-      }
-    }
-    if (!inked) {
+    const ink = glyphInk(pixels.data, w, h);
+    if (!ink) {
       this.entries.set(key, null);
       return null;
     }
@@ -214,7 +210,15 @@ class GlyphAtlas {
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-    const entry = { x, y, w, h, colored };
+    const entry = {
+      x: x + ink.left,
+      y: y + ink.top,
+      w: ink.width,
+      h: ink.height,
+      ox: ink.left,
+      oy: ink.top,
+      colored: ink.colored,
+    };
     this.entries.set(key, entry);
     return entry;
   }
@@ -258,6 +262,7 @@ export class WebglRenderer extends TerminalRenderer {
   private readonly glyphBuffer: WebGLBuffer;
   private readonly overlayRectBuffer: WebGLBuffer;
   private readonly overlayGlyphBuffer: WebGLBuffer;
+  private readonly decoBuffer: WebGLBuffer;
   private bgVao!: WebGLVertexArrayObject;
   private decoVao!: WebGLVertexArrayObject;
   private glyphVao!: WebGLVertexArrayObject;
@@ -276,6 +281,12 @@ export class WebglRenderer extends TerminalRenderer {
   private rectColors = new Uint32Array(0);
   private glyphWords = new Float32Array(0);
   private glyphColors = new Uint32Array(0);
+  private packedBg = instanceArrays(0, RECT_WORDS);
+  private packedDeco = instanceArrays(0, RECT_WORDS);
+  private packedGlyphs = instanceArrays(0, GLYPH_WORDS);
+  private bgCount = 0;
+  private decoCount = 0;
+  private glyphCount = 0;
   private readonly overlayRects = new Float32Array(OVERLAY_RECTS * RECT_WORDS);
   private readonly overlayRectColors = new Uint32Array(this.overlayRects.buffer);
   private readonly overlayGlyph = new Float32Array(GLYPH_WORDS);
@@ -343,6 +354,7 @@ export class WebglRenderer extends TerminalRenderer {
     );
     this.rectBuffer = gl.createBuffer()!;
     this.glyphBuffer = gl.createBuffer()!;
+    this.decoBuffer = gl.createBuffer()!;
     this.overlayRectBuffer = gl.createBuffer()!;
     this.overlayGlyphBuffer = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.overlayRectBuffer);
@@ -426,16 +438,22 @@ export class WebglRenderer extends TerminalRenderer {
       const glyphs = new ArrayBuffer(cells * GLYPH_WORDS * 4);
       this.glyphWords = new Float32Array(glyphs);
       this.glyphColors = new Uint32Array(glyphs);
+      this.packedBg = instanceArrays(cells, RECT_WORDS);
+      this.packedDeco = instanceArrays(cells * 2, RECT_WORDS);
+      this.packedGlyphs = instanceArrays(cells, GLYPH_WORDS);
       const gl = this.gl;
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.rectBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, rects.byteLength, gl.DYNAMIC_DRAW);
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.glyphBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, glyphs.byteLength, gl.DYNAMIC_DRAW);
+      const allocate = (buffer: WebGLBuffer, packed: InstanceArrays) => {
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, packed.bits.byteLength, gl.DYNAMIC_DRAW);
+      };
+      allocate(this.rectBuffer, this.packedBg);
+      allocate(this.decoBuffer, this.packedDeco);
+      allocate(this.glyphBuffer, this.packedGlyphs);
       for (const vao of [this.bgVao, this.decoVao, this.glyphVao]) {
         if (vao) gl.deleteVertexArray(vao);
       }
       this.bgVao = this.rectVao(this.rectBuffer, 0);
-      this.decoVao = this.rectVao(this.rectBuffer, cells * RECT_WORDS * 4);
+      this.decoVao = this.rectVao(this.decoBuffer, 0);
       this.glyphVao = this.glyphVaoFor(this.glyphBuffer);
     }
     this.markAllRows();
@@ -581,8 +599,8 @@ export class WebglRenderer extends TerminalRenderer {
       if (!isBlank(cell)) {
         const entry = this.glyphFor(cell, x, y);
         if (entry) {
-          glyphs[glyph] = left - this.padX;
-          glyphs[glyph + 1] = top - this.padY;
+          glyphs[glyph] = left - this.padX + entry.ox;
+          glyphs[glyph + 1] = top - this.padY + entry.oy;
           glyphs[glyph + 2] = entry.x;
           glyphs[glyph + 3] = entry.y;
           glyphs[glyph + 4] = entry.w;
@@ -708,8 +726,8 @@ export class WebglRenderer extends TerminalRenderer {
           const entry = this.glyphFor(cell, overlay.cursorX, overlay.cursorY);
           if (entry) {
             const g = this.overlayGlyph;
-            g[0] = left - this.padX;
-            g[1] = top - this.padY;
+            g[0] = left - this.padX + entry.ox;
+            g[1] = top - this.padY + entry.oy;
             g[2] = entry.x;
             g[3] = entry.y;
             g[4] = entry.w;
@@ -747,16 +765,22 @@ export class WebglRenderer extends TerminalRenderer {
     if (this.dirtyTo < this.dirtyFrom) return;
     const gl = this.gl;
     const cells = this.cols * this.rows;
-    const from = this.dirtyFrom * this.cols;
-    const count = (this.dirtyTo - this.dirtyFrom + 1) * this.cols;
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.rectBuffer);
-    for (let segment = 0; segment < 3; segment++) {
-      const start = (segment * cells + from) * RECT_WORDS;
-      gl.bufferSubData(gl.ARRAY_BUFFER, start * 4, this.rectWords, start, count * RECT_WORDS);
-    }
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.glyphBuffer);
-    const start = from * GLYPH_WORDS;
-    gl.bufferSubData(gl.ARRAY_BUFFER, start * 4, this.glyphWords, start, count * GLYPH_WORDS);
+    const slots = { words: this.rectWords, bits: this.rectColors };
+    this.bgCount = compactRects(slots, 0, cells, this.packedBg);
+    this.decoCount = compactRects(slots, cells, cells * 2, this.packedDeco);
+    this.glyphCount = compactGlyphs(
+      { words: this.glyphWords, bits: this.glyphColors },
+      cells,
+      this.packedGlyphs
+    );
+    const send = (buffer: WebGLBuffer, packed: InstanceArrays, count: number, wordsPer: number) => {
+      if (count === 0) return;
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, packed.bits, 0, count * wordsPer);
+    };
+    send(this.rectBuffer, this.packedBg, this.bgCount, RECT_WORDS);
+    send(this.decoBuffer, this.packedDeco, this.decoCount, RECT_WORDS);
+    send(this.glyphBuffer, this.packedGlyphs, this.glyphCount, GLYPH_WORDS);
     this.dirtyFrom = Number.POSITIVE_INFINITY;
     this.dirtyTo = -1;
   }
@@ -765,7 +789,6 @@ export class WebglRenderer extends TerminalRenderer {
     const gl = this.gl;
     const width = this.glCanvas.width;
     const height = this.glCanvas.height;
-    const cells = this.cols * this.rows;
     gl.viewport(0, 0, width, height);
     const bg = this.themeWords.background;
     const a = (bg >>> 24) / 255;
@@ -779,8 +802,10 @@ export class WebglRenderer extends TerminalRenderer {
 
     gl.useProgram(this.rectProgram);
     gl.uniform2f(this.rectResolution, width, height);
-    gl.bindVertexArray(this.bgVao);
-    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, cells);
+    if (this.bgCount > 0) {
+      gl.bindVertexArray(this.bgVao);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.bgCount);
+    }
 
     gl.useProgram(this.glyphProgram);
     gl.uniform2f(this.glyphResolution, width, height);
@@ -788,12 +813,16 @@ export class WebglRenderer extends TerminalRenderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.atlas.texture);
     gl.uniform1i(this.glyphTexture, 0);
-    gl.bindVertexArray(this.glyphVao);
-    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, cells);
+    if (this.glyphCount > 0) {
+      gl.bindVertexArray(this.glyphVao);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.glyphCount);
+    }
 
     gl.useProgram(this.rectProgram);
-    gl.bindVertexArray(this.decoVao);
-    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, cells * 2);
+    if (this.decoCount > 0) {
+      gl.bindVertexArray(this.decoVao);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.decoCount);
+    }
 
     if (overlayKey) {
       gl.bindBuffer(gl.ARRAY_BUFFER, this.overlayRectBuffer);
@@ -875,6 +904,7 @@ export class WebglRenderer extends TerminalRenderer {
       for (const buffer of [
         this.quad,
         this.rectBuffer,
+        this.decoBuffer,
         this.glyphBuffer,
         this.overlayRectBuffer,
         this.overlayGlyphBuffer,
