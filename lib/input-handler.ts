@@ -192,7 +192,6 @@ export class InputHandler {
   private mousedownListener: ((e: MouseEvent) => void) | null = null;
   private mouseupListener: ((e: MouseEvent) => void) | null = null;
   private mousemoveListener: ((e: MouseEvent) => void) | null = null;
-  private wheelListener: ((e: WheelEvent) => void) | null = null;
   private isComposing = false;
   private isDisposed = false;
   /**
@@ -319,9 +318,6 @@ export class InputHandler {
 
     this.mousemoveListener = this.handleMouseMove.bind(this);
     this.container.addEventListener('mousemove', this.mousemoveListener);
-
-    this.wheelListener = this.handleWheel.bind(this);
-    this.container.addEventListener('wheel', this.wheelListener, { passive: false });
   }
 
   /**
@@ -925,7 +921,7 @@ export class InputHandler {
   /**
    * Handle wheel event (scroll)
    */
-  private handleWheel(event: WheelEvent): void {
+  handleWheel(event: WheelEvent): void {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
 
@@ -1127,11 +1123,6 @@ export class InputHandler {
     if (this.mousemoveListener) {
       this.container.removeEventListener('mousemove', this.mousemoveListener);
       this.mousemoveListener = null;
-    }
-
-    if (this.wheelListener) {
-      this.container.removeEventListener('wheel', this.wheelListener);
-      this.wheelListener = null;
     }
 
     this.isDisposed = true;
