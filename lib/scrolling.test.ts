@@ -168,6 +168,93 @@ describe('Terminal Scrolling', () => {
     });
   });
 
+  describe('Line Delta Mode', () => {
+    test('should read DOM_DELTA_LINE deltas as lines in alternate screen', async () => {
+      terminal.write('\x1B[?1049h');
+
+      const dataSent: string[] = [];
+      terminal.onData((data) => dataSent.push(data));
+
+      container.dispatchEvent(
+        new WheelEvent('wheel', {
+          deltaY: 3,
+          deltaMode: WheelEvent.DOM_DELTA_LINE,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+
+      expect(dataSent).toEqual(['\x1B[B', '\x1B[B', '\x1B[B']);
+    });
+  });
+
+  describe('Mouse Tracking', () => {
+    function wheelAt(deltaY: number, clientX: number, clientY: number): WheelEvent {
+      const event = new WheelEvent('wheel', { deltaY, bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clientX', { value: clientX });
+      Object.defineProperty(event, 'clientY', { value: clientY });
+      return event;
+    }
+
+    test('should report wheel up to the application once', async () => {
+      terminal.write('\x1B[?1000h\x1B[?1006h');
+
+      const dataSent: string[] = [];
+      terminal.onData((data) => dataSent.push(data));
+
+      container.dispatchEvent(wheelAt(-100, 20, 40));
+
+      expect(dataSent).toEqual(['\x1B[<64;3;3M']);
+    });
+
+    test('should report wheel down to the application once', async () => {
+      terminal.write('\x1B[?1000h\x1B[?1006h');
+
+      const dataSent: string[] = [];
+      terminal.onData((data) => dataSent.push(data));
+
+      container.dispatchEvent(wheelAt(100, 20, 40));
+
+      expect(dataSent).toEqual(['\x1B[<65;3;3M']);
+    });
+
+    test('should report a wheel event that targets a child of the container', async () => {
+      terminal.write('\x1B[?1000h\x1B[?1006h');
+
+      const dataSent: string[] = [];
+      terminal.onData((data) => dataSent.push(data));
+
+      const canvas = container.querySelector('canvas');
+      expect(canvas).not.toBeNull();
+      canvas!.dispatchEvent(wheelAt(-100, 20, 40));
+
+      expect(dataSent).toEqual(['\x1B[<64;3;3M']);
+    });
+
+    test('should report the wheel instead of arrow keys in alternate screen', async () => {
+      terminal.write('\x1B[?1049h\x1B[?1000h\x1B[?1006h');
+
+      const dataSent: string[] = [];
+      terminal.onData((data) => dataSent.push(data));
+
+      container.dispatchEvent(wheelAt(-100, 20, 40));
+
+      expect(dataSent).toEqual(['\x1B[<64;3;3M']);
+    });
+
+    test('should not scroll the viewport while mouse tracking is on', async () => {
+      for (let i = 0; i < 50; i++) {
+        terminal.write(`Line ${i}\r\n`);
+      }
+      terminal.write('\x1B[?1000h\x1B[?1006h');
+      const initialViewportY = terminal.viewportY;
+
+      container.dispatchEvent(wheelAt(-100, 20, 40));
+
+      expect(terminal.viewportY).toBe(initialViewportY);
+    });
+  });
+
   describe('Mode Transitions', () => {
     test('should switch behavior when entering alternate screen', async () => {
       // Start in normal mode

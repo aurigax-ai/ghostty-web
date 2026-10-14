@@ -1709,6 +1709,11 @@ export class Terminal implements ITerminalCore {
       return;
     }
 
+    if (this.wasmTerm?.hasMouseTracking()) {
+      this.inputHandler?.handleWheel(e);
+      return;
+    }
+
     // Check if in alternate screen mode (vim, less, htop, etc.)
     const isAltScreen = this.wasmTerm?.isAlternateScreen() ?? false;
 
@@ -1717,7 +1722,8 @@ export class Terminal implements ITerminalCore {
       // Applications like vim handle scrolling internally
       // Standard: ~3 arrow presses per wheel "click"
       const direction = e.deltaY > 0 ? 'down' : 'up';
-      const count = Math.min(Math.abs(Math.round(e.deltaY / 33)), 5); // Cap at 5
+      const lines = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? e.deltaY : e.deltaY / 33;
+      const count = Math.min(Math.abs(Math.round(lines)), 5); // Cap at 5
 
       for (let i = 0; i < count; i++) {
         if (direction === 'up') {
