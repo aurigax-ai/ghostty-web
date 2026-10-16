@@ -61,5 +61,7 @@ describe('scrollbar', () => {
     term.scrollLines(-3);
     term.options.scrollbar = false;
     expect((term as unknown as { scrollbarOpacity: number }).scrollbarOpacity).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect((term as unknown as { scrollbarOpacity: number }).scrollbarOpacity).toBe(0);
   });
 });

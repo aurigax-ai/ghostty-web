@@ -2004,6 +2004,7 @@ export class Terminal implements ITerminalCore {
     this.wake();
     const startTime = Date.now();
     const animate = () => {
+      if (!this.options.scrollbar) return;
       const elapsed = Date.now() - startTime;
       const progress = Math.min(elapsed / this.SCROLLBAR_FADE_DURATION_MS, 1);
       this.scrollbarOpacity = progress;
