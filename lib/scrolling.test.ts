@@ -767,3 +767,116 @@ describe('Custom Wheel Event Handler', () => {
     expect((term as any).viewportY).toBeGreaterThan(0);
   });
 });
+
+describe('Viewport while output arrives', () => {
+  let term: Terminal;
+  let container: HTMLDivElement;
+
+  const fill = (lines: number): void => {
+    for (let i = 0; i < lines; i++) {
+      term.write(`Line ${i}\r\n`);
+    }
+  };
+
+  const topLine = (): string => {
+    const line = term.buffer.active.getLine(term.buffer.active.viewportY);
+    return line?.translateToString(true) ?? '';
+  };
+
+  beforeEach(async () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    term = await createIsolatedTerminal({ cols: 80, rows: 24, scrollback: 1000 });
+    term.open(container);
+  });
+
+  afterEach(() => {
+    term.dispose();
+    document.body.removeChild(container);
+  });
+
+  test('a write keeps the viewport on the same content', () => {
+    fill(100);
+    term.scrollLines(-10);
+    const before = topLine();
+    const absoluteTop = term.buffer.active.viewportY;
+
+    fill(30);
+
+    expect(topLine()).toBe(before);
+    expect(term.buffer.active.viewportY).toBe(absoluteTop);
+    expect(term.viewportY).toBe(40);
+  });
+
+  test('a write does not fire onScroll while the viewport holds', () => {
+    fill(100);
+    term.scrollLines(-10);
+    let fired = 0;
+    term.onScroll(() => fired++);
+
+    fill(30);
+
+    expect(fired).toBe(0);
+  });
+
+  test('a write at the bottom keeps following the output', () => {
+    fill(100);
+    fill(30);
+
+    expect(term.viewportY).toBe(0);
+  });
+
+  test('scrolling back to the bottom resumes following the output', () => {
+    fill(100);
+    term.scrollLines(-10);
+    fill(5);
+    term.scrollToBottom();
+    fill(5);
+
+    expect(term.viewportY).toBe(0);
+  });
+
+  test('typing scrolls to the bottom', () => {
+    fill(100);
+    term.scrollLines(-10);
+
+    term.input('a', true);
+
+    expect(term.viewportY).toBe(0);
+  });
+
+  test('pasting scrolls to the bottom', () => {
+    fill(100);
+    term.scrollLines(-10);
+
+    term.paste('a');
+
+    expect(term.viewportY).toBe(0);
+  });
+
+  test('scrollOnUserInput false keeps the viewport when typing', async () => {
+    term.dispose();
+    term = await createIsolatedTerminal({
+      cols: 80,
+      rows: 24,
+      scrollback: 1000,
+      scrollOnUserInput: false,
+    });
+    term.open(container);
+    fill(100);
+    term.scrollLines(-10);
+
+    term.input('a', true);
+
+    expect(term.viewportY).toBe(10);
+  });
+
+  test('clearing the scrollback moves a scrolled viewport to the bottom', () => {
+    fill(100);
+    term.scrollLines(-10);
+
+    term.write('\x1b[3J');
+
+    expect(term.viewportY).toBe(0);
+  });
+});
