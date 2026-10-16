@@ -864,6 +864,11 @@ export class GhosttyTerminal {
     return this.trackLineStart(POINT_ACTIVE, activeY);
   }
 
+  /** Tracks the start of an absolute line (scrollback first). */
+  trackScreenRow(screenY: number): TrackedRow | null {
+    return this.trackLineStart(POINT_SCREEN, screenY);
+  }
+
   /**
    * Whether the terminal may have discarded rows since the last call, which is
    * the only way a tracked row loses its line: libghostty-vt prunes scrollback

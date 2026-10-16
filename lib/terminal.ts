@@ -26,6 +26,7 @@ import {
   type GhosttyTerminalConfig,
   type MouseTrackingMode,
   type SemanticPromptEvent,
+  type TrackedRow,
 } from './ghostty';
 import { getGhostty } from './index';
 import { InputHandler, type MouseTrackingConfig } from './input-handler';
@@ -59,6 +60,12 @@ import { WebglRenderer } from './webgl-renderer';
 // ============================================================================
 // Terminal Class
 // ============================================================================
+
+interface ViewportAnchor {
+  row: TrackedRow;
+  viewportY: number;
+  scrollback: number;
+}
 
 export class Terminal implements ITerminalCore {
   // Public properties (xterm.js compatibility)
@@ -725,7 +732,7 @@ export class Terminal implements ITerminalCore {
     // preserve selection when new data arrives. Selection is cleared by user actions
     // like clicking or typing, not by incoming data.
 
-    const scrollbackBefore = this.wasmTerm!.getScrollbackLength();
+    const anchor = this.anchorViewport();
 
     // Write directly to WASM terminal (handles VT parsing internally)
     this.wasmTerm!.write(data);
@@ -737,7 +744,7 @@ export class Terminal implements ITerminalCore {
     // Invalidate link cache (content changed)
     this.linkDetector?.invalidateCache();
 
-    this.holdViewport(scrollbackBefore);
+    this.restoreViewport(anchor);
 
     this.afterWrite();
 
@@ -756,14 +763,30 @@ export class Terminal implements ITerminalCore {
     // Render will happen on next animation frame
   }
 
-  private holdViewport(scrollbackBefore: number): void {
-    if (this.viewportY === 0) return;
+  private anchorViewport(): ViewportAnchor | null {
+    if (this.viewportY <= 0 || !this.wasmTerm) return null;
+    if (this.scrollAnimationFrame !== undefined && this.targetViewportY === 0) return null;
+    const scrollback = this.wasmTerm.getScrollbackLength();
+    const row = this.wasmTerm.trackScreenRow(scrollback - Math.floor(this.viewportY));
+    if (!row) return null;
+    return { row, viewportY: this.viewportY, scrollback };
+  }
+
+  private restoreViewport(anchor: ViewportAnchor | null): void {
+    if (!anchor) return;
+    const line = anchor.row.line();
+    anchor.row.free();
     const scrollback = this.getScrollbackLength();
-    const grown = Math.max(0, scrollback - scrollbackBefore);
-    const topBefore = scrollbackBefore - this.viewportY;
-    this.viewportY = Math.min(scrollback, this.viewportY + grown);
-    this.targetViewportY = Math.min(scrollback, this.targetViewportY + grown);
-    if (scrollback - this.viewportY !== topBefore) {
+    const fraction = anchor.viewportY - Math.floor(anchor.viewportY);
+    const viewportY =
+      line === null ? scrollback : Math.max(0, Math.min(scrollback, scrollback - line + fraction));
+    const shift = viewportY - anchor.viewportY;
+    this.viewportY = viewportY;
+    this.targetViewportY =
+      this.scrollAnimationFrame === undefined
+        ? viewportY
+        : Math.max(0, Math.min(scrollback, this.targetViewportY + shift));
+    if (Math.round(scrollback - viewportY) !== Math.round(anchor.scrollback - anchor.viewportY)) {
       this.fireScroll();
     }
   }
@@ -860,8 +883,11 @@ export class Terminal implements ITerminalCore {
       this.cols = cols;
       this.rows = rows;
 
+      const anchor = this.anchorViewport();
+
       // Resize WASM terminal (may reallocate buffers, invalidating TypedArray views)
       this.wasmTerm!.resize(cols, rows);
+      this.restoreViewport(anchor);
       this.refreshMarkers(false);
 
       // Resize renderer
@@ -1125,6 +1151,7 @@ export class Terminal implements ITerminalCore {
    */
   public scrollToBottom(): void {
     this.wake();
+    this.stopScrollAnimation();
     if (this.viewportY !== 0) {
       this.viewportY = 0;
       this.fireScroll();
@@ -1133,6 +1160,15 @@ export class Terminal implements ITerminalCore {
         this.showScrollbar();
       }
     }
+  }
+
+  private stopScrollAnimation(): void {
+    if (this.scrollAnimationFrame !== undefined) {
+      cancelAnimationFrame(this.scrollAnimationFrame);
+    }
+    this.scrollAnimationFrame = undefined;
+    this.scrollAnimationStartTime = undefined;
+    this.targetViewportY = 0;
   }
 
   /** Scrolls so that absolute buffer line `line` (0 = oldest scrollback line) is at the top, like xterm.js. */
@@ -1271,11 +1307,7 @@ export class Terminal implements ITerminalCore {
     this.cancelRenderLoop();
     this.writeQueue.length = 0;
 
-    // Stop smooth scroll animation
-    if (this.scrollAnimationFrame) {
-      cancelAnimationFrame(this.scrollAnimationFrame);
-      this.scrollAnimationFrame = undefined;
-    }
+    this.stopScrollAnimation();
 
     // Clear mouse move throttle timeout
     if (this.mouseMoveThrottleTimeout) {

@@ -879,4 +879,115 @@ describe('Viewport while output arrives', () => {
 
     expect(term.viewportY).toBe(0);
   });
+
+  test('a write that overflows the scrollback keeps the viewport on the same content', async () => {
+    term.dispose();
+    term = await createIsolatedTerminal({ cols: 80, rows: 24, scrollback: 50 });
+    term.open(container);
+    fill(2000);
+    expect(term.buffer.active.baseY).toBeLessThan(1900);
+    term.scrollLines(-5);
+    const before = topLine();
+
+    fill(3);
+
+    expect(topLine()).toBe(before);
+  });
+
+  test('the viewport lands on the oldest line once its content is pruned', async () => {
+    term.dispose();
+    term = await createIsolatedTerminal({ cols: 80, rows: 24, scrollback: 50 });
+    term.open(container);
+    fill(2000);
+    term.scrollToTop();
+
+    fill(5000);
+
+    expect(term.viewportY).toBe(term.buffer.active.baseY);
+  });
+
+  test('scrollToBottom stops a running smooth scroll and its target', async () => {
+    term.dispose();
+    term = await createIsolatedTerminal({
+      cols: 80,
+      rows: 24,
+      scrollback: 1000,
+      smoothScrollDuration: 100,
+    });
+    term.open(container);
+    fill(100);
+    (term as any).smoothScrollTo(30);
+
+    term.scrollToBottom();
+    fill(5);
+
+    expect((term as any).scrollAnimationFrame).toBeUndefined();
+    expect((term as any).targetViewportY).toBe(0);
+    expect(term.viewportY).toBe(0);
+  });
+
+  test('a write while smooth scrolling to the bottom does not hold the viewport', async () => {
+    term.dispose();
+    term = await createIsolatedTerminal({
+      cols: 80,
+      rows: 24,
+      scrollback: 1000,
+      smoothScrollDuration: 100,
+    });
+    term.open(container);
+    fill(100);
+    term.scrollLines(-20);
+    (term as any).smoothScrollTo(0);
+    const before = term.viewportY;
+
+    fill(10);
+
+    expect((term as any).targetViewportY).toBe(0);
+    expect(term.viewportY).toBe(before);
+  });
+
+  test('a write while smooth scrolling up moves the target with the content', async () => {
+    term.dispose();
+    term = await createIsolatedTerminal({
+      cols: 80,
+      rows: 24,
+      scrollback: 1000,
+      smoothScrollDuration: 100,
+    });
+    term.open(container);
+    fill(100);
+    term.scrollLines(-5);
+    (term as any).smoothScrollTo(30);
+    const before = term.viewportY;
+
+    fill(10);
+
+    expect((term as any).targetViewportY).toBe(40);
+    expect(term.viewportY).toBeCloseTo(before + 10, 5);
+  });
+
+  test('resizing the rows keeps the viewport on the same content', () => {
+    fill(100);
+    term.scrollLines(-10);
+    const before = topLine();
+
+    term.resize(80, 10);
+
+    expect(topLine()).toBe(before);
+    expect(term.viewportY).toBeLessThanOrEqual(term.buffer.active.baseY);
+  });
+
+  test('resizing the columns reflows the viewport onto the same content', () => {
+    for (let i = 0; i < 100; i++) {
+      term.write(`Line ${i} ${'x'.repeat(60)}\r\n`);
+    }
+    term.scrollLines(-10);
+    const before = topLine();
+
+    term.resize(40, 24);
+
+    expect(topLine().startsWith('Line')).toBe(true);
+    expect(topLine().slice(0, 8)).toBe(before.slice(0, 8));
+    expect(term.viewportY).toBeLessThanOrEqual(term.buffer.active.baseY);
+  });
 });
