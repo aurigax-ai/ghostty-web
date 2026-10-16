@@ -210,6 +210,7 @@ export class Terminal implements ITerminalCore {
       convertEol: options.convertEol ?? false,
       disableStdin: options.disableStdin ?? false,
       scrollOnUserInput: options.scrollOnUserInput ?? true,
+      scrollbar: options.scrollbar ?? true,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
       fontWeight: options.fontWeight ?? 'normal',
       fontWeightBold: options.fontWeightBold ?? 'bold',
@@ -297,6 +298,10 @@ export class Terminal implements ITerminalCore {
 
       case 'scrollback':
         this.wasmTerm?.configure({ scrollbackLimit: this.options.scrollback });
+        break;
+
+      case 'scrollbar':
+        if (!this.options.scrollbar) this.dropScrollbar();
         break;
 
       case 'fontSize':
@@ -1827,7 +1832,7 @@ export class Terminal implements ITerminalCore {
     if (!this.canvas || !this.renderer || !this.wasmTerm) return;
 
     const scrollbackLength = this.wasmTerm.getScrollbackLength();
-    if (scrollbackLength === 0) return; // No scrollbar if no scrollback
+    if (scrollbackLength === 0 || !this.options.scrollbar) return;
 
     const rect = this.canvas.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
@@ -1938,6 +1943,7 @@ export class Terminal implements ITerminalCore {
    * Show scrollbar with fade-in and schedule auto-hide
    */
   private showScrollbar(): void {
+    if (!this.options.scrollbar) return;
     this.wake();
     // Clear any existing hide timeout
     if (this.scrollbarHideTimeout) {
@@ -1961,6 +1967,19 @@ export class Terminal implements ITerminalCore {
         this.hideScrollbar();
       }, this.SCROLLBAR_HIDE_DELAY_MS);
     }
+  }
+
+  private dropScrollbar(): void {
+    this.wake();
+    if (this.scrollbarHideTimeout) {
+      window.clearTimeout(this.scrollbarHideTimeout);
+      this.scrollbarHideTimeout = undefined;
+    }
+    this.isDraggingScrollbar = false;
+    this.scrollbarDragStart = null;
+    this.scrollbarVisible = false;
+    this.scrollbarOpacity = 0;
+    this.draw(true, 0);
   }
 
   /**

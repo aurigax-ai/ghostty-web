@@ -41,6 +41,7 @@ export interface ITerminalOptions {
   scrollOnUserInput?: boolean; // Typing or pasting scrolls to the bottom (default: true)
 
   // Scrolling options
+  scrollbar?: boolean; // Draw the built-in scrollbar and let it be dragged (default: true)
   smoothScrollDuration?: number; // Duration in ms for smooth scroll animation (default: 100, 0 = instant)
 
   // Internal: Ghostty WASM instance (optional, for test isolation)
