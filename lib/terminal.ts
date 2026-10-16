@@ -202,6 +202,7 @@ export class Terminal implements ITerminalCore {
       renderer: options.renderer ?? 'webgl',
       convertEol: options.convertEol ?? false,
       disableStdin: options.disableStdin ?? false,
+      scrollOnUserInput: options.scrollOnUserInput ?? true,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
       fontWeight: options.fontWeight ?? 'normal',
       fontWeightBold: options.fontWeightBold ?? 'bold',
@@ -510,6 +511,7 @@ export class Terminal implements ITerminalCore {
           }
           // Clear selection when user types
           this.selectionManager?.clearSelection();
+          this.followUserInput();
           this.awaitingEcho = true;
           // Input handler fires data events
           this.dataEmitter.fire(data);
@@ -723,6 +725,8 @@ export class Terminal implements ITerminalCore {
     // preserve selection when new data arrives. Selection is cleared by user actions
     // like clicking or typing, not by incoming data.
 
+    const scrollbackBefore = this.wasmTerm!.getScrollbackLength();
+
     // Write directly to WASM terminal (handles VT parsing internally)
     this.wasmTerm!.write(data);
 
@@ -733,10 +737,7 @@ export class Terminal implements ITerminalCore {
     // Invalidate link cache (content changed)
     this.linkDetector?.invalidateCache();
 
-    // Phase 2: Auto-scroll to bottom on new output (xterm.js behavior)
-    if (this.viewportY !== 0) {
-      this.scrollToBottom();
-    }
+    this.holdViewport(scrollbackBefore);
 
     this.afterWrite();
 
@@ -753,6 +754,24 @@ export class Terminal implements ITerminalCore {
     }
 
     // Render will happen on next animation frame
+  }
+
+  private holdViewport(scrollbackBefore: number): void {
+    if (this.viewportY === 0) return;
+    const scrollback = this.getScrollbackLength();
+    const grown = Math.max(0, scrollback - scrollbackBefore);
+    const topBefore = scrollbackBefore - this.viewportY;
+    this.viewportY = Math.min(scrollback, this.viewportY + grown);
+    this.targetViewportY = Math.min(scrollback, this.targetViewportY + grown);
+    if (scrollback - this.viewportY !== topBefore) {
+      this.fireScroll();
+    }
+  }
+
+  private followUserInput(): void {
+    if (this.options.scrollOnUserInput) {
+      this.scrollToBottom();
+    }
   }
 
   /**
@@ -782,6 +801,7 @@ export class Terminal implements ITerminalCore {
       return;
     }
 
+    this.followUserInput();
     this.awaitingEcho = true;
 
     // Check if terminal has bracketed paste mode enabled
@@ -809,6 +829,7 @@ export class Terminal implements ITerminalCore {
     }
 
     if (wasUserInput) {
+      this.followUserInput();
       this.awaitingEcho = true;
       // Trigger onData event as if user typed it
       this.dataEmitter.fire(data);

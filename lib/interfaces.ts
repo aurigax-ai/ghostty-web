@@ -38,6 +38,7 @@ export interface ITerminalOptions {
   // Phase 1 additions
   convertEol?: boolean; // Convert \n to \r\n (default: false)
   disableStdin?: boolean; // Disable keyboard input (default: false)
+  scrollOnUserInput?: boolean; // Typing or pasting scrolls to the bottom (default: true)
 
   // Scrolling options
   smoothScrollDuration?: number; // Duration in ms for smooth scroll animation (default: 100, 0 = instant)
