@@ -881,6 +881,8 @@ export class InputHandler {
 
     const button = event.button;
 
+    if (!(this.mouseButtonsPressed & (1 << button))) return;
+
     // Clear pressed button
     this.mouseButtonsPressed &= ~(1 << button);
 

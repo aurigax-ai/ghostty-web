@@ -1258,7 +1258,7 @@ export class Terminal implements ITerminalCore {
     const absDistance = Math.abs(distance);
 
     // If very close, snap to target
-    if (absDistance < 0.01) {
+    if (absDistance < 0.01 || duration <= 0) {
       this.viewportY = this.targetViewportY;
       this.fireScroll();
 

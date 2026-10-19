@@ -1245,4 +1245,59 @@ describe('InputHandler', () => {
       expect(dataReceived.length).toBe(0);
     });
   });
+
+  describe('Mouse Tracking', () => {
+    const mouseConfig = {
+      hasMouseTracking: () => true,
+      hasSgrMouseMode: () => true,
+      getCellDimensions: () => ({ width: 10, height: 20 }),
+      getCanvasOffset: () => ({ left: 0, top: 0 }),
+    };
+
+    function createMouseHandler(): InputHandler {
+      return new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        () => {
+          bellCalled = true;
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        mouseConfig
+      );
+    }
+
+    function mouse(type: 'mousedown' | 'mouseup', ctrlKey = false): void {
+      container.dispatchEvent({
+        type,
+        button: 0,
+        clientX: 45,
+        clientY: 5,
+        ctrlKey,
+        shiftKey: false,
+        metaKey: false,
+      });
+    }
+
+    test('reports a press and its release', () => {
+      createMouseHandler();
+
+      mouse('mousedown');
+      mouse('mouseup');
+
+      expect(dataReceived).toEqual(['\x1b[<0;5;1M', '\x1b[<0;5;1m']);
+    });
+
+    test('does not report a release whose press the program never saw', () => {
+      createMouseHandler();
+
+      mouse('mouseup', true);
+
+      expect(dataReceived).toEqual([]);
+    });
+  });
 });
