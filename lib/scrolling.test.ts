@@ -926,6 +926,25 @@ describe('Viewport while output arrives', () => {
     expect(term.viewportY).toBe(0);
   });
 
+  test('turning smooth scrolling off during a smooth scroll snaps to the target', async () => {
+    term.dispose();
+    term = await createIsolatedTerminal({
+      cols: 80,
+      rows: 24,
+      scrollback: 1000,
+      smoothScrollDuration: 100,
+    });
+    term.open(container);
+    fill(100);
+    (term as any).smoothScrollTo(30);
+
+    term.options.smoothScrollDuration = 0;
+    (term as any).animateScroll();
+
+    expect(term.viewportY).toBe(30);
+    expect((term as any).scrollAnimationFrame).toBeUndefined();
+  });
+
   test('a write while smooth scrolling to the bottom does not hold the viewport', async () => {
     term.dispose();
     term = await createIsolatedTerminal({
