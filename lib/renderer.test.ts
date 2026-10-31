@@ -70,14 +70,20 @@ describe('hovered link decoration', () => {
     document.body.appendChild(container);
     const term = await createIsolatedTerminal({ renderer: 'canvas' });
     term.open(container);
-    term.write('\x1b]8;;http://a.test\x1b\\AAAA\x1b]8;;\x1b\\ \x1b]8;;http://b.test\x1b\\BBBB\x1b]8;;\x1b\\');
+    term.write(
+      '\x1b]8;;http://a.test\x1b\\AAAA\x1b]8;;\x1b\\ \x1b]8;;http://b.test\x1b\\BBBB\x1b]8;;\x1b\\'
+    );
     const inner = term as unknown as {
-      renderer: { charWidth: number; charHeight: number; linkHovered(x: number, y: number): boolean };
+      renderer: {
+        charWidth: number;
+        charHeight: number;
+        linkHovered(x: number, y: number): boolean;
+      };
       processMouseMove(e: MouseEvent): void;
     };
     const { charWidth, charHeight } = inner.renderer;
     inner.processMouseMove(
-      new MouseEvent('mousemove', { clientX: 1.5 * charWidth, clientY: 0.5 * charHeight }),
+      new MouseEvent('mousemove', { clientX: 1.5 * charWidth, clientY: 0.5 * charHeight })
     );
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(inner.renderer.linkHovered(1, 0)).toBe(true);
