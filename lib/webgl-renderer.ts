@@ -610,7 +610,7 @@ export class WebglRenderer extends TerminalRenderer {
         }
       }
 
-      const link = (cell.hyperlink_id > 0 || this.hoveredLinkRange) && this.linkHovered(cell, x, y);
+      const link = this.hoveredLinkRange && this.linkHovered(x, y);
       if (link || cell.flags & CellFlags.UNDERLINE) {
         rects[deco1] = left;
         rects[deco1 + 1] = underlineY;

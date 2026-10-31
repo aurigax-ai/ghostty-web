@@ -268,8 +268,6 @@ export abstract class TerminalRenderer {
   private readonly highlightRows = new Set<number>();
   protected highlightColors: SearchHighlightColors = { match: '#5c6266', active: '#538bb5' };
 
-  protected hoveredHyperlinkId = 0;
-  private previousHoveredHyperlinkId = 0;
   protected hoveredLinkRange: LinkRange | null = null;
   private previousHoveredLinkRange: LinkRange | null = null;
 
@@ -385,22 +383,6 @@ export abstract class TerminalRenderer {
     };
 
     const hyperlinkRows = new Set<number>();
-    if (this.hoveredHyperlinkId !== this.previousHoveredHyperlinkId) {
-      for (let y = 0; y < dims.rows; y++) {
-        const line = lineAt(y);
-        if (!line) continue;
-        for (const cell of line) {
-          if (
-            cell.hyperlink_id === this.hoveredHyperlinkId ||
-            cell.hyperlink_id === this.previousHoveredHyperlinkId
-          ) {
-            hyperlinkRows.add(y);
-            break;
-          }
-        }
-      }
-      this.previousHoveredHyperlinkId = this.hoveredHyperlinkId;
-    }
     if (!sameRange(this.hoveredLinkRange, this.previousHoveredLinkRange)) {
       for (const range of [this.previousHoveredLinkRange, this.hoveredLinkRange]) {
         if (!range) continue;
@@ -511,9 +493,8 @@ export abstract class TerminalRenderer {
   /** Called when the search highlight colors change. */
   protected searchColorsChanged(): void {}
 
-  /** Whether the cell has a hovered link under it (OSC 8 id or a detected URL range). */
-  protected linkHovered(cell: GhosttyCell, x: number, y: number): boolean {
-    if (cell.hyperlink_id > 0 && cell.hyperlink_id === this.hoveredHyperlinkId) return true;
+  /** Whether the cell has a hovered link under it (OSC 8 or detected URL range). */
+  protected linkHovered(x: number, y: number): boolean {
     const range = this.hoveredLinkRange;
     if (!range) return false;
     return (
@@ -674,14 +655,6 @@ export abstract class TerminalRenderer {
 
   public setSelectionManager(manager: SelectionManager): void {
     this.selectionManager = manager;
-  }
-
-  public setHoveredHyperlinkId(hyperlinkId: number): void {
-    this.hoveredHyperlinkId = hyperlinkId;
-  }
-
-  public getHoveredHyperlinkId(): number {
-    return this.hoveredHyperlinkId;
   }
 
   /** Set the hovered range of a detected URL, or null to clear it. */
@@ -1006,7 +979,7 @@ export class CanvasRenderer extends TerminalRenderer {
   private renderDecorations(cell: GhosttyCell, x: number, y: number, color: string): void {
     const underline = cell.flags & CellFlags.UNDERLINE;
     const strike = cell.flags & CellFlags.STRIKETHROUGH;
-    const link = (cell.hyperlink_id > 0 || this.hoveredLinkRange) && this.linkHovered(cell, x, y);
+    const link = this.hoveredLinkRange && this.linkHovered(x, y);
     if (!underline && !strike && !link) return;
     const cellX = x * this.metrics.width;
     const cellY = y * this.metrics.height;
