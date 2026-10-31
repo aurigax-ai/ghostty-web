@@ -8,6 +8,7 @@
 
 import { describe, expect, test } from 'vitest';
 import { DEFAULT_THEME } from './renderer';
+import { createIsolatedTerminal } from './test-helpers';
 
 describe('CanvasRenderer', () => {
   describe('Default Theme', () => {
@@ -60,5 +61,34 @@ describe('CanvasRenderer', () => {
       expect(DEFAULT_THEME.background).toMatch(hexPattern);
       expect(DEFAULT_THEME.cursor).toMatch(hexPattern);
     });
+  });
+});
+
+describe('hovered link decoration', () => {
+  test('marks only the hovered OSC 8 link, though every OSC 8 cell has hyperlink_id 1', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const term = await createIsolatedTerminal({ renderer: 'canvas' });
+    term.open(container);
+    term.write(
+      '\x1b]8;;http://a.test\x1b\\AAAA\x1b]8;;\x1b\\ \x1b]8;;http://b.test\x1b\\BBBB\x1b]8;;\x1b\\'
+    );
+    const inner = term as unknown as {
+      renderer: {
+        charWidth: number;
+        charHeight: number;
+        linkHovered(x: number, y: number): boolean;
+      };
+      processMouseMove(e: MouseEvent): void;
+    };
+    const { charWidth, charHeight } = inner.renderer;
+    inner.processMouseMove(
+      new MouseEvent('mousemove', { clientX: 1.5 * charWidth, clientY: 0.5 * charHeight })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(inner.renderer.linkHovered(1, 0)).toBe(true);
+    expect(inner.renderer.linkHovered(6, 0)).toBe(false);
+    term.dispose();
+    container.remove();
   });
 });
