@@ -232,8 +232,8 @@ export interface TrackedRow {
 const POINT_ACTIVE = 'ACTIVE';
 const POINT_HISTORY = 'HISTORY';
 const POINT_SCREEN = 'SCREEN';
-type PointSpace = typeof POINT_ACTIVE | typeof POINT_HISTORY;
-type PointTag = PointSpace | typeof POINT_SCREEN;
+type PointSpace = typeof POINT_ACTIVE | typeof POINT_HISTORY | typeof POINT_SCREEN;
+type PointTag = PointSpace;
 
 const GRAPHEME_CAP = 16;
 const GRAPHEME_CLUSTER_MODE = 2027;
@@ -1035,6 +1035,61 @@ export class GhosttyTerminal {
     const out = this.responses.join('');
     this.responses = [];
     return out;
+  }
+
+  /**
+   * The rows `from` to `to` (0 is the oldest scrollback row) of the screen that
+   * is showing, as text with its colours and styles as escape sequences. A
+   * wrapped line comes back as one line, lines end in CR LF, and empty rows at
+   * the end are dropped. One call into the engine, whatever the number of rows.
+   */
+  formatRows(from: number, to: number): string {
+    const abi = this.abi;
+    const optionsSize = abi.sizeOf('GhosttyFormatterTerminalOptions');
+    const selectionSize = abi.sizeOf('GhosttySelection');
+    const refSize = abi.sizeOf('GhosttyGridRef');
+    const lastCol = this._cols - 1;
+    return abi.with(optionsSize + selectionSize, (base) => {
+      const options = base;
+      const selection = base + optionsSize;
+      const O = (field: string) => options + abi.offset('GhosttyFormatterTerminalOptions', field);
+      const S = (field: string) => selection + abi.offset('GhosttySelection', field);
+      abi.view().setUint32(selection, selectionSize, true);
+      const place = (field: string, x: number, y: number) =>
+        this.gridRef(POINT_SCREEN, x, y, (ref) => {
+          abi.bytes().copyWithin(S(field), ref, ref + refSize);
+          return true;
+        });
+      if (!place('start', 0, from) || !place('end', lastCol, to)) return '';
+      const view = abi.view();
+      view.setUint32(O('size'), optionsSize, true);
+      view.setInt32(O('emit'), abi.enumValue('GhosttyFormatterFormat', 'VT'), true);
+      view.setUint8(O('unwrap'), 1);
+      view.setUint8(O('trim'), 1);
+      view.setUint32(O('extra'), abi.sizeOf('GhosttyFormatterTerminalExtra'), true);
+      view.setUint32(O('selection'), selection, true);
+      const slot = abi.call('ghostty_wasm_alloc_opaque');
+      try {
+        abi.check('ghostty_formatter_terminal_new', 0, slot, this.handle, options);
+        const formatter = abi.call('ghostty_wasm_take_opaque', slot);
+        try {
+          const written = abi.scratch(4);
+          const probe = abi.call('ghostty_formatter_format_buf', formatter, 0, 0, written);
+          if (probe === GHOSTTY_SUCCESS) return '';
+          if (probe !== GHOSTTY_OUT_OF_SPACE)
+            throw new GhosttyCallError('ghostty_formatter_format_buf', probe);
+          const need = abi.view().getUint32(written, true);
+          return abi.with(need, (buf) => {
+            abi.check('ghostty_formatter_format_buf', formatter, buf, need, written);
+            return abi.string(buf, abi.view().getUint32(written, true));
+          });
+        } finally {
+          abi.call('ghostty_formatter_free', formatter);
+        }
+      } finally {
+        abi.call('ghostty_wasm_free_opaque', slot);
+      }
+    });
   }
 
   getGrapheme(row: number, col: number): number[] | null {

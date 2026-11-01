@@ -310,4 +310,57 @@ describe('HeadlessTerminal', () => {
     expect(line?.translateToString(false)).toBe('ab  cd    ');
     expect(line?.translateToString(false, 0, 2)).toBe('ab');
   });
+
+  describe('serialize', () => {
+    test('joins a wrapped line and keeps blank lines between content', () => {
+      make(10, 4, 100);
+      term.write('one\r\n\r\n' + 'x'.repeat(25) + '\r\nlast');
+      const lines = term.serialize({ from: 0, to: term.buffer.normal.length - 1 });
+      expect(lines).toEqual(['one', '', 'x'.repeat(25), 'last']);
+    });
+
+    test('pads empty rows at the end, one line per unwrapped row', () => {
+      make(10, 6, 100);
+      term.write('a\r\nb\r\n');
+      const lines = term.serialize({ from: 0, to: 5 });
+      expect(lines).toEqual(['a', 'b', '', '', '', '']);
+    });
+
+    test('keeps colours as palette entries, RGB and styles', () => {
+      make(30, 3, 100);
+      term.write('\x1b[1;31mred\x1b[0m \x1b[38;2;1;2;3mrgb\x1b[0m \x1b[44mbg\x1b[K\x1b[0m');
+      const [line] = term.serialize({ from: 0, to: 0 });
+      expect(line).toContain('\x1b[1m');
+      expect(line).toContain('\x1b[38;5;1m');
+      expect(line).toContain('\x1b[38;2;1;2;3m');
+      expect(line).toContain('\x1b[48;5;4m');
+      expect(line).toContain('red');
+    });
+
+    test('replays into a terminal that shows the same text', () => {
+      make(20, 5, 200);
+      term.write(`${lines(40)}\x1b[32mgreen\x1b[0m tail\r\n`);
+      const total = term.buffer.normal.length;
+      const saved = term.serialize({ from: 0, to: total - 1 }).join('\r\n');
+      const copy = new HeadlessTerminal({ ghostty, cols: 20, rows: 5, scrollback: 200 });
+      copy.write(`${saved}\r\n`);
+      const text = (t: HeadlessTerminal) =>
+        Array.from({ length: t.buffer.normal.length }, (_, y) =>
+          t.buffer.normal.getLine(y)?.translateToString(true)
+        )
+          .join('\n')
+          .trimEnd();
+      expect(text(copy)).toBe(text(term));
+      copy.dispose();
+    });
+
+    test('reads thousands of rows in one call fast enough', () => {
+      make(120, 40, 4000);
+      term.write(lines(5000));
+      const start = performance.now();
+      const out = term.serialize({ from: 0, to: term.buffer.normal.length - 1 });
+      expect(out.length).toBeGreaterThan(3000);
+      expect(performance.now() - start).toBeLessThan(250);
+    });
+  });
 });
