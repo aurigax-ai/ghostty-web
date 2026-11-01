@@ -272,10 +272,7 @@ export class BufferLine implements IBufferLine {
     let result = '';
     for (let x = start; x < end; x++) {
       const cell = this.getCell(x);
-      if (cell) {
-        const chars = cell.getChars();
-        result += chars;
-      }
+      if (cell && cell.getWidth() !== 0) result += cell.getChars() || ' ';
     }
 
     if (trimRight) {

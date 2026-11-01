@@ -301,4 +301,13 @@ describe('HeadlessTerminal', () => {
     expect(buffer.getLine(0)?.translateToString(true)).toBe('e\u0301 \u5b97\u5b57 \u{1F600}');
     expect(buffer.getLine(0)?.getCell(0)?.getChars()).toBe('e\u0301');
   });
+
+  test('translateToString fills skipped cells with spaces and trims on request', () => {
+    make(10, 3);
+    term.write('ab\x1b[5Gcd');
+    const line = term.buffer.normal.getLine(0);
+    expect(line?.translateToString(true)).toBe('ab  cd');
+    expect(line?.translateToString(false)).toBe('ab  cd    ');
+    expect(line?.translateToString(false, 0, 2)).toBe('ab');
+  });
 });
