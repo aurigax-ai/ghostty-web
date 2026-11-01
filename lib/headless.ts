@@ -150,6 +150,35 @@ export class HeadlessTerminal implements IDisposable {
     this.refreshMarkers(engine.rowsDiscarded());
   }
 
+  /**
+   * The logical lines of the rows `from` to `to` (0 is the oldest scrollback
+   * row) of the screen that is showing, each with its colours and styles as
+   * escape sequences. A wrapped line is one line, so the count is the number
+   * of rows that do not continue the row before them, empty rows at the end
+   * included. Costs one call into the engine, not one per row or cell.
+   */
+  serialize(range: { from: number; to: number }): string[] {
+    const engine = this.wasmTerm;
+    if (!engine || range.to < range.from) return [];
+    const text = engine.formatRows(range.from, range.to);
+    const printed = text === '' ? [] : text.split('\r\n');
+    const scrollback = engine.isAlternateScreen() ? 0 : engine.getScrollbackLength();
+    const wrapped = (y: number): boolean =>
+      y < scrollback ? engine.isScrollbackRowWrapped(y) : engine.isRowWrapped(y - scrollback);
+    const starts = [range.from];
+    for (let y = range.from + 1; y <= range.to; y++) if (!wrapped(y)) starts.push(y);
+    const lines: string[] = [];
+    let at = 0;
+    for (const [i, start] of starts.entries()) {
+      const rows = (starts[i + 1] ?? range.to + 1) - start;
+      let blank = 0;
+      while (blank < rows - 1 && engine.formatRows(start + blank, start + blank) === '') blank++;
+      at += blank;
+      lines.push(' '.repeat(blank * this.cols) + (printed[at++] ?? ''));
+    }
+    return lines;
+  }
+
   registerMarker(cursorYOffset = 0): IMarker | undefined {
     const engine = this.wasmTerm;
     if (!engine) return undefined;
