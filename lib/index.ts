@@ -56,6 +56,9 @@ export function getGhostty(): Ghostty {
 
 // Main Terminal class
 export { Terminal } from './terminal';
+export { HeadlessTerminal } from './headless';
+export type { HeadlessParser, HeadlessTerminalOptions, OscHandler } from './headless';
+export type { CsiHandler, CsiIdentifier, CsiParams } from './csi-observer';
 
 // xterm.js-compatible interfaces
 export type {
@@ -65,6 +68,10 @@ export type {
   ITerminalCore,
   IDisposable,
   IEvent,
+  IBuffer,
+  IBufferCell,
+  IBufferLine,
+  IBufferNamespace,
   IBufferRange,
   IKeyEvent,
   IUnicodeVersionProvider,
@@ -88,7 +95,7 @@ export type {
 } from './ghostty';
 export type { IMarker } from './marker';
 export { Abi, GhosttyCallError } from './abi';
-export { Key, KeyAction, Mods } from './types';
+export { ColorKind, Key, KeyAction, Mods } from './types';
 export type { KeyEvent, GhosttyCell, RGB, Cursor, TerminalHandle } from './types';
 
 // Low-level components (for custom integrations)
