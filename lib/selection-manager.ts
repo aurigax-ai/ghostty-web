@@ -795,7 +795,9 @@ export class SelectionManager {
       // scrollLines convention: negative = scroll up into history, positive = scroll down to newer
       // So direction maps directly to scrollLines sign
       const scrollAmount = SelectionManager.AUTO_SCROLL_SPEED * this.autoScrollDirection;
+      const topBefore = this.viewportRowToAbsolute(0);
       (this.terminal as any).scrollLines(scrollAmount);
+      if (this.viewportRowToAbsolute(0) === topBefore) return;
 
       // Extend selection in the scroll direction
       // Key insight: we need to EXTEND the selection, not reset it to viewport edge

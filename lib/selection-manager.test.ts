@@ -12,7 +12,7 @@
  * Uses createIsolatedTerminal() to ensure each test gets its own WASM instance.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { Terminal } from './terminal';
 import { createIsolatedTerminal } from './test-helpers';
 
@@ -632,6 +632,26 @@ describe('SelectionManager', () => {
       expect(selectedText.length).toBeGreaterThan(0);
 
       term.dispose();
+    });
+  });
+
+  describe('Auto-scroll near the top edge', () => {
+    test('a drag near the top edge keeps its end cell when there is nothing to scroll', async () => {
+      if (!container) return;
+      vi.useFakeTimers();
+      const term = await createIsolatedTerminal({ cols: 80, rows: 24 });
+      term.open(container);
+      term.write('one\r\ntwo\r\nthree\r\n');
+      const selMgr = (term as any).selectionManager;
+      selMgr.selectionStart = { col: 2, absoluteRow: 1 };
+      selMgr.selectionEnd = { col: 9, absoluteRow: 1 };
+      selMgr.isSelecting = true;
+      selMgr.updateAutoScroll(10, 400);
+      vi.advanceTimersByTime(300);
+      expect(selMgr.selectionEnd).toEqual({ col: 9, absoluteRow: 1 });
+      selMgr.isSelecting = false;
+      term.dispose();
+      vi.useRealTimers();
     });
   });
 });
