@@ -91,7 +91,7 @@ export type {
 } from './ghostty';
 export type { IMarker } from './marker';
 export { Abi, GhosttyCallError } from './abi';
-export { Key, KeyAction, Mods } from './types';
+export { ColorKind, Key, KeyAction, Mods } from './types';
 export type { KeyEvent, GhosttyCell, RGB, Cursor, TerminalHandle } from './types';
 
 // Low-level components (for custom integrations)

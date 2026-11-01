@@ -3,6 +3,7 @@
  */
 
 import type { Ghostty } from './ghostty';
+import type { ColorKind } from './types';
 
 export interface ITerminalOptions {
   cols?: number; // Default: 80
@@ -221,6 +222,15 @@ export interface IBufferCell {
   getFgColor(): number;
   /** Background RGB color (or 0 for default) */
   getBgColor(): number;
+
+  /** How the foreground was set: default, a palette entry or RGB */
+  getFgKind(): ColorKind;
+  /** How the background was set: default, a palette entry or RGB */
+  getBgKind(): ColorKind;
+  /** The foreground palette entry, when getFgKind() is PALETTE */
+  getFgPaletteIndex(): number;
+  /** The background palette entry, when getBgKind() is PALETTE */
+  getBgPaletteIndex(): number;
 
   /** Whether cell has bold style */
   isBold(): number;

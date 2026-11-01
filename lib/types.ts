@@ -418,6 +418,16 @@ export interface GhosttyCell {
   width: number; // u8 (character width: 1=normal, 2=wide, etc.)
   hyperlink_id: number; // u16 (0 = no link, >0 = hyperlink ID in set)
   grapheme_len: number; // u8 (number of extra codepoints beyond first)
+  fg_kind: ColorKind; // how the foreground was set: default, a palette entry or RGB
+  bg_kind: ColorKind;
+  fg_index: number; // palette entry when fg_kind is PALETTE
+  bg_index: number;
+}
+
+export enum ColorKind {
+  DEFAULT = 0,
+  PALETTE = 1,
+  RGB = 2,
 }
 
 /**

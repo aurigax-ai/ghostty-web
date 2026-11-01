@@ -18,6 +18,7 @@ import { EventEmitter } from './event-emitter';
 import type { IEvent } from './interfaces';
 import {
   CellFlags,
+  ColorKind,
   type Cursor,
   DirtyState,
   type GhosttyCell,
@@ -33,6 +34,7 @@ import {
 // Re-export types for convenience
 export {
   CellFlags,
+  ColorKind,
   type Cursor,
   DirtyState,
   type GhosttyCell,
@@ -1402,9 +1404,27 @@ export class GhosttyTerminal {
     let fg = this.colors.foreground;
     let bg = this.colors.background;
     let flags = 0;
+    let fgKind = ColorKind.DEFAULT;
+    let bgKind = ColorKind.DEFAULT;
+    let fgIndex = 0;
+    let bgIndex = 0;
     if (styleId !== 0) {
       fg = this.styleColor(view, stylePtr + L.fgColor) ?? fg;
       bg = this.styleColor(view, stylePtr + L.bgColor) ?? bg;
+      const fgTag = view.getInt32(stylePtr + L.fgColor + L.colorTag, true);
+      const bgTag = view.getInt32(stylePtr + L.bgColor + L.colorTag, true);
+      if (fgTag === L.colorPalette) {
+        fgKind = ColorKind.PALETTE;
+        fgIndex = view.getUint8(stylePtr + L.fgColor + L.colorValue);
+      } else if (fgTag === L.colorRgb) {
+        fgKind = ColorKind.RGB;
+      }
+      if (bgTag === L.colorPalette) {
+        bgKind = ColorKind.PALETTE;
+        bgIndex = view.getUint8(stylePtr + L.bgColor + L.colorValue);
+      } else if (bgTag === L.colorRgb) {
+        bgKind = ColorKind.RGB;
+      }
       if (view.getUint8(stylePtr + L.bold)) flags |= CellFlags.BOLD;
       if (view.getUint8(stylePtr + L.italic)) flags |= CellFlags.ITALIC;
       if (view.getInt32(stylePtr + L.underline, true) !== 0) flags |= CellFlags.UNDERLINE;
@@ -1416,9 +1436,16 @@ export class GhosttyTerminal {
     }
     if (tag === L.tagBgPalette) {
       bg = this.colors.palette[contentBits & 0xff] ?? bg;
+      bgKind = ColorKind.PALETTE;
+      bgIndex = contentBits & 0xff;
     } else if (tag === L.tagBgRgb) {
       bg = { r: contentBits & 0xff, g: (contentBits >> 8) & 0xff, b: (contentBits >> 16) & 0xff };
+      bgKind = ColorKind.RGB;
     }
+    cell.fg_kind = fgKind;
+    cell.bg_kind = bgKind;
+    cell.fg_index = fgIndex;
+    cell.bg_index = bgIndex;
     cell.fg_r = fg.r;
     cell.fg_g = fg.g;
     cell.fg_b = fg.b;
@@ -1515,6 +1542,10 @@ export class GhosttyTerminal {
       width: 1,
       hyperlink_id: 0,
       grapheme_len: 0,
+      fg_kind: ColorKind.DEFAULT,
+      bg_kind: ColorKind.DEFAULT,
+      fg_index: 0,
+      bg_index: 0,
     };
   }
 

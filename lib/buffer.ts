@@ -17,9 +17,29 @@
 
 import { EventEmitter } from './event-emitter';
 import type { GhosttyTerminal } from './ghostty';
-import { CellFlags } from './ghostty';
+import { CellFlags, ColorKind } from './ghostty';
 import type { IBuffer, IBufferCell, IBufferLine, IBufferNamespace, IEvent } from './interfaces';
 import type { GhosttyCell } from './types';
+
+function nullCellData(): GhosttyCell {
+  return {
+    codepoint: 0,
+    fg_r: 204,
+    fg_g: 204,
+    fg_b: 204,
+    bg_r: 0,
+    bg_g: 0,
+    bg_b: 0,
+    flags: 0,
+    width: 1,
+    hyperlink_id: 0,
+    grapheme_len: 0,
+    fg_kind: ColorKind.DEFAULT,
+    bg_kind: ColorKind.DEFAULT,
+    fg_index: 0,
+    bg_index: 0,
+  };
+}
 
 /** What a buffer reads from its terminal: the wasm engine and how far the viewport is scrolled back. */
 export interface BufferHost {
@@ -101,20 +121,7 @@ export class Buffer implements IBuffer {
     this.bufferType = type;
 
     // Create a null cell (codepoint=0, default colors, no flags)
-    const nullCellData: GhosttyCell = {
-      codepoint: 0,
-      fg_r: 204,
-      fg_g: 204,
-      fg_b: 204,
-      bg_r: 0,
-      bg_g: 0,
-      bg_b: 0,
-      flags: 0,
-      width: 1,
-      hyperlink_id: 0,
-      grapheme_len: 0,
-    };
-    this.nullCell = new BufferCell(nullCellData, 0);
+    this.nullCell = new BufferCell(nullCellData(), 0);
   }
 
   get type(): 'normal' | 'alternate' {
@@ -242,22 +249,7 @@ export class BufferLine implements IBufferLine {
 
     if (x >= this.cells.length) {
       // Cell beyond what was returned (empty/null cell)
-      return new BufferCell(
-        {
-          codepoint: 0,
-          fg_r: 204,
-          fg_g: 204,
-          fg_b: 204,
-          bg_r: 0,
-          bg_g: 0,
-          bg_b: 0,
-          flags: 0,
-          width: 1,
-          hyperlink_id: 0,
-          grapheme_len: 0,
-        },
-        x
-      );
+      return new BufferCell(nullCellData(), x);
     }
 
     return new BufferCell(this.cells[x], x);
@@ -323,6 +315,22 @@ export class BufferCell implements IBufferCell {
 
   getWidth(): number {
     return this.cell.width;
+  }
+
+  getFgKind(): ColorKind {
+    return this.cell.fg_kind;
+  }
+
+  getBgKind(): ColorKind {
+    return this.cell.bg_kind;
+  }
+
+  getFgPaletteIndex(): number {
+    return this.cell.fg_index;
+  }
+
+  getBgPaletteIndex(): number {
+    return this.cell.bg_index;
   }
 
   getFgColorMode(): number {

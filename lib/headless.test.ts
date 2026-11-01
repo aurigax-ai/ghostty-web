@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, test } from 'vitest';
-import { Ghostty } from './ghostty';
+import { ColorKind, Ghostty } from './ghostty';
 import { HeadlessTerminal } from './headless';
 
 let ghostty: Ghostty;
@@ -281,5 +281,16 @@ describe('HeadlessTerminal', () => {
     make();
     term.write('\x1b[6n'.repeat(100));
     expect(term.wasmTerm?.hasResponse()).toBe(false);
+  });
+
+  test('cells say how their colours were set', () => {
+    make();
+    term.write('a\x1b[31;48;5;200mb\x1b[38;2;1;2;3;49mc');
+    const line = term.buffer.normal.getLine(0);
+    const [a, b, c] = [0, 1, 2].map((x) => line?.getCell(x));
+    expect([a?.getFgKind(), a?.getBgKind()]).toEqual([ColorKind.DEFAULT, ColorKind.DEFAULT]);
+    expect([b?.getFgKind(), b?.getFgPaletteIndex()]).toEqual([ColorKind.PALETTE, 1]);
+    expect([b?.getBgKind(), b?.getBgPaletteIndex()]).toEqual([ColorKind.PALETTE, 200]);
+    expect([c?.getFgKind(), c?.getBgKind()]).toEqual([ColorKind.RGB, ColorKind.DEFAULT]);
   });
 });
