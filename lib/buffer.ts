@@ -184,6 +184,7 @@ export class Buffer implements IBuffer {
     let cells: GhosttyCell[] | null;
     let lineNumber: number;
     let isWrapped: boolean;
+    let graphemes: (x: number) => string;
 
     if (this.bufferType === 'normal' && y < scrollbackLength) {
       // Accessing scrollback
@@ -193,18 +194,20 @@ export class Buffer implements IBuffer {
       const scrollbackOffset = y;
       cells = wasmTerm.getScrollbackLine(scrollbackOffset);
       isWrapped = wasmTerm.isScrollbackRowWrapped(scrollbackOffset);
+      graphemes = (x) => wasmTerm.getScrollbackGraphemeString(scrollbackOffset, x);
     } else {
       // Accessing visible screen
       lineNumber = this.bufferType === 'normal' ? y - scrollbackLength : y;
       cells = wasmTerm.getLine(lineNumber);
       isWrapped = wasmTerm.isRowWrapped(lineNumber);
+      graphemes = (x) => wasmTerm.getGraphemeString(lineNumber, x);
     }
 
     if (!cells) {
       return undefined;
     }
 
-    return new BufferLine(cells, isWrapped, wasmTerm.cols);
+    return new BufferLine(cells, isWrapped, wasmTerm.cols, graphemes);
   }
 
   getNullCell(): IBufferCell {
@@ -228,7 +231,12 @@ export class BufferLine implements IBufferLine {
   private _isWrapped: boolean;
   private _length: number;
 
-  constructor(cells: GhosttyCell[], isWrapped: boolean, length: number) {
+  constructor(
+    cells: GhosttyCell[],
+    isWrapped: boolean,
+    length: number,
+    private readonly graphemes?: (x: number) => string
+  ) {
     this.cells = cells;
     this._isWrapped = isWrapped;
     this._length = length;
@@ -252,7 +260,8 @@ export class BufferLine implements IBufferLine {
       return new BufferCell(nullCellData(), x);
     }
 
-    return new BufferCell(this.cells[x], x);
+    const cell = this.cells[x];
+    return new BufferCell(cell, x, cell.grapheme_len > 0 ? this.graphemes?.(x) : undefined);
   }
 
   translateToString(trimRight = false, startColumn = 0, endColumn = this._length): string {
@@ -287,11 +296,16 @@ export class BufferLine implements IBufferLine {
 export class BufferCell implements IBufferCell {
   private cell: GhosttyCell;
 
-  constructor(cell: GhosttyCell, _x: number) {
+  constructor(
+    cell: GhosttyCell,
+    _x: number,
+    private readonly grapheme?: string
+  ) {
     this.cell = cell;
   }
 
   getChars(): string {
+    if (this.grapheme) return this.grapheme;
     const codepoint = this.cell.codepoint;
 
     // Return empty string for null character or invalid codepoints

@@ -293,4 +293,12 @@ describe('HeadlessTerminal', () => {
     expect([b?.getBgKind(), b?.getBgPaletteIndex()]).toEqual([ColorKind.PALETTE, 200]);
     expect([c?.getFgKind(), c?.getBgKind()]).toEqual([ColorKind.RGB, ColorKind.DEFAULT]);
   });
+
+  test('lines keep combined characters and wide characters once', () => {
+    make(20, 3, 3);
+    term.write('e\u0301 \u5b97\u5b57 \u{1F600}\r\n1\r\n2\r\n3\r\n4');
+    const buffer = term.buffer.normal;
+    expect(buffer.getLine(0)?.translateToString(true)).toBe('e\u0301 \u5b97\u5b57 \u{1F600}');
+    expect(buffer.getLine(0)?.getCell(0)?.getChars()).toBe('e\u0301');
+  });
 });
