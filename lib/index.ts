@@ -56,6 +56,9 @@ export function getGhostty(): Ghostty {
 
 // Main Terminal class
 export { Terminal } from './terminal';
+export { HeadlessTerminal } from './headless';
+export type { HeadlessParser, HeadlessTerminalOptions, OscHandler } from './headless';
+export type { CsiHandler, CsiIdentifier, CsiParams } from './csi-observer';
 
 // xterm.js-compatible interfaces
 export type {

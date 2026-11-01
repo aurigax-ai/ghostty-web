@@ -70,6 +70,23 @@ blink) and sleeps otherwise. `setPaused(true)` stops drawing a terminal that is 
 keeps parsing output; `setPaused(false)` redraws it whole. `setPaused(true, { releaseRenderer: true })`
 also gives up its WebGL context until then, since browsers keep only a few.
 
+## Headless terminal
+
+`HeadlessTerminal` parses bytes with no DOM, canvas or renderer, for a server or worker that keeps a screen and scrollback.
+
+```ts
+import { Ghostty, HeadlessTerminal } from '@aurigax-ai/ghostty-web';
+
+const ghostty = await Ghostty.fromBytes(wasmBytes);
+const term = new HeadlessTerminal({ ghostty, cols: 120, rows: 40, scrollback: 2000 });
+term.parser.registerOscHandler(133, (data) => false);
+term.parser.registerCsiHandler({ final: 'J' }, (params) => {});
+term.write('hello\r\n', () => {});
+term.buffer.normal.getLine(0)?.translateToString(true);
+```
+
+It has `buffer`, `registerMarker`, `onScroll`, `onWriteParsed`, `modes.bracketedPasteMode`, `resize` and `dispose`, with the xterm.js names. OSC handlers get the payload after the number (7, 133 and any other number). CSI handlers only observe a sequence, just before the terminal applies it. `scrollback` frees whole pages, so a screen can hold fewer lines than the limit (about half at 80 columns) and a narrow one more.
+
 ## Use
 
 ```ts
