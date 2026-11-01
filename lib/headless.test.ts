@@ -319,6 +319,15 @@ describe('HeadlessTerminal', () => {
       expect(lines).toEqual(['one', '', 'x'.repeat(25), 'last']);
     });
 
+    test('keeps one line for a wrapped line that starts with empty cells', () => {
+      make(80, 4, 100);
+      term.write('\x1b[70GX\r\nnext\r\n');
+      term.resize(40, 4);
+      const lines = term.serialize({ from: 0, to: term.buffer.normal.length - 1 });
+      expect(lines[0]).toBe(`${' '.repeat(69)}X`);
+      expect(lines[1]).toBe('next');
+    });
+
     test('pads empty rows at the end, one line per unwrapped row', () => {
       make(10, 6, 100);
       term.write('a\r\nb\r\n');

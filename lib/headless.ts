@@ -161,15 +161,21 @@ export class HeadlessTerminal implements IDisposable {
     const engine = this.wasmTerm;
     if (!engine || range.to < range.from) return [];
     const text = engine.formatRows(range.from, range.to);
-    const lines = text === '' ? [] : text.split('\r\n');
+    const printed = text === '' ? [] : text.split('\r\n');
     const scrollback = engine.isAlternateScreen() ? 0 : engine.getScrollbackLength();
-    let expected = 1;
-    for (let y = range.from + 1; y <= range.to; y++) {
-      const wrapped =
-        y < scrollback ? engine.isScrollbackRowWrapped(y) : engine.isRowWrapped(y - scrollback);
-      if (!wrapped) expected++;
+    const wrapped = (y: number): boolean =>
+      y < scrollback ? engine.isScrollbackRowWrapped(y) : engine.isRowWrapped(y - scrollback);
+    const starts = [range.from];
+    for (let y = range.from + 1; y <= range.to; y++) if (!wrapped(y)) starts.push(y);
+    const lines: string[] = [];
+    let at = 0;
+    for (const [i, start] of starts.entries()) {
+      const rows = (starts[i + 1] ?? range.to + 1) - start;
+      let blank = 0;
+      while (blank < rows - 1 && engine.formatRows(start + blank, start + blank) === '') blank++;
+      at += blank;
+      lines.push(' '.repeat(blank * this.cols) + (printed[at++] ?? ''));
     }
-    while (lines.length < expected) lines.push('');
     return lines;
   }
 
