@@ -1271,14 +1271,14 @@ describe('InputHandler', () => {
       );
     }
 
-    function mouse(type: 'mousedown' | 'mouseup', ctrlKey = false): void {
+    function mouse(type: 'mousedown' | 'mouseup', ctrlKey = false, shiftKey = false): void {
       container.dispatchEvent({
         type,
         button: 0,
         clientX: 45,
         clientY: 5,
         ctrlKey,
-        shiftKey: false,
+        shiftKey,
         metaKey: false,
       });
     }
@@ -1290,6 +1290,15 @@ describe('InputHandler', () => {
       mouse('mouseup');
 
       expect(dataReceived).toEqual(['\x1b[<0;5;1M', '\x1b[<0;5;1m']);
+    });
+
+    test('keeps Shift presses and releases from the program, so Shift selects', () => {
+      createMouseHandler();
+
+      mouse('mousedown', false, true);
+      mouse('mouseup', false, true);
+
+      expect(dataReceived).toEqual([]);
     });
 
     test('does not report a release whose press the program never saw', () => {
